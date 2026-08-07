@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -565,7 +566,7 @@ func (m Model) handleTapExited(msg tapExitedMsg) (tea.Model, tea.Cmd) {
 
 	case m.stopRequested:
 		sess.Release()
-		status := "saved " + sess.RecordDir
+		status := "saved " + hyperlink(sess.RecordDir, sess.RecordDir)
 		if record.ShouldDiscard(time.Since(sess.Start)) {
 			_ = sess.Discard()
 			status = "discarded (shorter than 2s)"
@@ -670,7 +671,7 @@ func (m Model) detailView() string {
 		r.Date.Format("2006-01-02 15:04"),
 		"durata: " + duration,
 		"size: " + records.FormatSize(r.SizeBytes),
-		"path: " + m.detailPath,
+		"path: " + hyperlink(m.detailPath, m.detailPath),
 		"transcript: " + transcript,
 	}
 	if m.statusMsg != "" {
@@ -698,7 +699,7 @@ func (m Model) recordingView() string {
 	if l := m.levelLine(); l != "" {
 		lines = append(lines, l)
 	}
-	lines = append(lines, "", m.sess.RecordDir, records.FormatSize(m.recSize))
+	lines = append(lines, "", hyperlink(m.sess.RecordDir, m.sess.RecordDir), records.FormatSize(m.recSize))
 	if m.recWarning != "" {
 		lines = append(lines, errStyle.Render("warning: "+m.recWarning))
 	}
@@ -792,4 +793,13 @@ func footerFor(mode screen) string {
 func Run(cfg config.Config, recs []records.Record) error {
 	_, err := tea.NewProgram(New(cfg, recs)).Run()
 	return err
+}
+
+// hyperlink wraps text in an OSC 8 terminal hyperlink pointing at path as a
+// file:// URL, so terminals like Ghostty make it cmd+clickable (a directory
+// opens in Finder). Terminals without OSC 8 support ignore the sequence and
+// show the bare text.
+func hyperlink(text, path string) string {
+	u := url.URL{Scheme: "file", Path: path}
+	return "\x1b]8;;" + u.String() + "\x1b\\" + text + "\x1b]8;;\x1b\\"
 }

@@ -589,3 +589,17 @@ func TestDeletedMsgReloadsListWithStatus(t *testing.T) {
 		t.Errorf("isErr = true, want false")
 	}
 }
+
+func TestHyperlink(t *testing.T) {
+	tests := []struct {
+		text, path, want string
+	}{
+		{"x", "/tmp/plain", "\x1b]8;;file:///tmp/plain\x1b\\x\x1b]8;;\x1b\\"},
+		{"y", "/tmp/con spazio", "\x1b]8;;file:///tmp/con%20spazio\x1b\\y\x1b]8;;\x1b\\"},
+	}
+	for _, tt := range tests {
+		if got := hyperlink(tt.text, tt.path); got != tt.want {
+			t.Errorf("hyperlink(%q, %q) = %q, want %q", tt.text, tt.path, got, tt.want)
+		}
+	}
+}
