@@ -244,7 +244,7 @@ func TestFooterForKnownModesNonEmpty(t *testing.T) {
 	modes := []screen{
 		modeList, modeDetail, modeRecording, modeNameForm, modeDownloading,
 		modeTranscribing, modeRecError, modeTranscribeMissingWhisper,
-		modeTranscribeDownloadConfirm, modeTranscribeError,
+		modeTranscribeDownloadConfirm, modeTranscribeError, modeHelp,
 	}
 	for _, mode := range modes {
 		for _, compact := range []bool{false, true} {
@@ -318,12 +318,16 @@ func TestListDKeyAsksDeleteConfirmation(t *testing.T) {
 
 func TestListDeleteConfirmYDeletesAndReturnsToList(t *testing.T) {
 	dir := t.TempDir()
+	// A fake home, so trashDir() (homeDir + ".Trash") lands in a tempdir
+	// instead of the real ~/.Trash.
+	home := t.TempDir()
 	recDir := filepath.Join(dir, "2026-08-06-1430-standup")
 	if err := os.MkdirAll(recDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 
 	m := New(config.Config{OutputDir: dir}, []records.Record{{ID: "2026-08-06-1430-standup"}})
+	m.homeDir = home
 	m.confirmDelete = true
 
 	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "y", Code: 'y'})
@@ -342,8 +346,14 @@ func TestListDeleteConfirmYDeletesAndReturnsToList(t *testing.T) {
 	if msg.err != nil {
 		t.Errorf("deletedMsg.err = %v, want nil", msg.err)
 	}
+	if msg.fellBack {
+		t.Errorf("deletedMsg.fellBack = true, want false (Trash was available)")
+	}
 	if _, err := os.Stat(recDir); !os.IsNotExist(err) {
 		t.Errorf("record dir still exists after delete")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".Trash", "2026-08-06-1430-standup")); err != nil {
+		t.Errorf("record dir not found in Trash: %v", err)
 	}
 }
 
@@ -749,11 +759,33 @@ func TestDeletedMsgReloadsListWithStatus(t *testing.T) {
 	if !ok {
 		t.Fatalf("cmd() = %T, want recordsReloadedMsg", cmd())
 	}
-	if msg.status != "deleted 2026-08-06-1430-standup" {
-		t.Errorf("status = %q, want %q", msg.status, "deleted 2026-08-06-1430-standup")
+	if msg.status != "moved to Trash: 2026-08-06-1430-standup" {
+		t.Errorf("status = %q, want %q", msg.status, "moved to Trash: 2026-08-06-1430-standup")
 	}
 	if msg.isErr {
 		t.Errorf("isErr = true, want false")
+	}
+}
+
+func TestFormatSavedStatus(t *testing.T) {
+	got := formatSavedStatus(2527, "/Users/alex/Recordings/nastro/2026-08-07-1430-cliente-eppi", "/Users/alex", 200)
+	wantDisplay := "~/Recordings/nastro/2026-08-07-1430-cliente-eppi"
+	want := "✓ saved 42:07 · " + hyperlink(wantDisplay, "/Users/alex/Recordings/nastro/2026-08-07-1430-cliente-eppi")
+	if got != want {
+		t.Errorf("formatSavedStatus() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatSavedStatusTruncatesDisplayButKeepsRealHref(t *testing.T) {
+	dir := "/Users/alex/Recordings/nastro/2026-08-07-1430-cliente-eppi-molto-lungo"
+	got := formatSavedStatus(60, dir, "/Users/alex", 40)
+	if !strings.Contains(got, "…") {
+		t.Errorf("formatSavedStatus() = %q, want a truncated (…) display path at this width", got)
+	}
+	// The OSC 8 href must carry the real, untruncated path even though the
+	// visible text is shortened.
+	if !strings.Contains(got, dir) {
+		t.Errorf("formatSavedStatus() = %q, href does not point at the real path %q", got, dir)
 	}
 }
 

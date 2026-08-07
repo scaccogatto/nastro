@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/paginator"
 	"charm.land/bubbles/v2/progress"
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
@@ -62,6 +63,7 @@ const (
 	modeDownloading
 	modeTranscribing
 	modeTranscribeError
+	modeHelp
 )
 
 // transcribePhase distinguishes the two visible stages of a transcribe run,
@@ -82,6 +84,11 @@ type Model struct {
 	cfg  config.Config
 	mode screen
 
+	// homeDir is the user's home directory, resolved once at New() time
+	// (empty if it couldn't be): used to abbreviate displayed paths to "~"
+	// and to locate ~/.Trash and ~/.config/nastro/config.toml.
+	homeDir string
+
 	// width/height are the terminal's last known size (from WindowSizeMsg),
 	// used to keep every view and the footer within it.
 	width, height int
@@ -97,7 +104,8 @@ type Model struct {
 	recWarning     string
 
 	// name form, shown before starting a recording
-	nameInput textinput.Model
+	nameInput    textinput.Model
+	nameFormMode captureMode
 
 	// detail screen
 	detailRec     records.Record
@@ -108,18 +116,21 @@ type Model struct {
 	confirmDelete bool
 
 	// transcribe flow, triggered from the list or detail screen
-	transcribeTarget  records.Record
-	transcribeReturn  screen
-	confirmOverwrite  bool
-	pendingModelPath  string
-	transcribeErr     error
-	transcribeStart   time.Time
-	transcribePhase   transcribePhase
-	transcribeSpinner spinner.Model
-	transcribeLines   []string
-	transcribeJob     *transcribe.Job
-	transcribeTmpWav  string
-	transcribeCancel  context.CancelFunc
+	transcribeTarget   records.Record
+	transcribeReturn   screen
+	confirmOverwrite   bool
+	pendingModelPath   string
+	transcribeErr      error
+	transcribeStart    time.Time
+	transcribePhase    transcribePhase
+	transcribeSpinner  spinner.Model
+	transcribeLines    []string
+	transcribeJob      *transcribe.Job
+	transcribeTmpWav   string
+	transcribeCancel   context.CancelFunc
+	transcribeProgress progress.Model
+	transcribePct      float64
+	transcribeHasPct   bool
 
 	downloadJob      *transcribe.DownloadJob
 	downloadPct      float64
@@ -140,12 +151,17 @@ func New(cfg config.Config, recs []records.Record) Model {
 	l.Title = "nastro records"
 	l.SetShowHelp(false)
 	l.Styles = themedListStyles()
+	l.Paginator.Type = paginator.Arabic
+
+	home, _ := os.UserHomeDir()
 
 	return Model{
-		list:              l,
-		cfg:               cfg,
-		transcribeSpinner: spinner.New(spinner.WithSpinner(spinner.MiniDot)),
-		downloadProgress:  progress.New(),
+		list:               l,
+		cfg:                cfg,
+		homeDir:            home,
+		transcribeSpinner:  spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		transcribeProgress: progress.New(),
+		downloadProgress:   progress.New(),
 	}
 }
 
@@ -158,6 +174,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h, v := appStyle.GetFrameSize()
 		m.list.SetSize(msg.Width-h, msg.Height-v-chromeLines)
 		m.downloadProgress.SetWidth(min(40, max(m.contentWidth()-4, 1)))
+		m.transcribeProgress.SetWidth(min(40, max(m.contentWidth()-4, 1)))
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -224,11 +241,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case deletedMsg:
-		status := "deleted " + msg.id
-		isErr := msg.err != nil
-		if isErr {
-			status = "error deleting " + msg.id + ": " + msg.err.Error()
-		}
+		status, isErr := deleteStatus(msg)
 		return m, rescanCmd(m.cfg.OutputDir, status, isErr)
 
 	case transcribePrereqMsg:
@@ -246,7 +259,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case transcribeLineMsg:
 		m.transcribePhase = transcribeRunning
-		m.transcribeLines = appendCapped(m.transcribeLines, msg.line, 3)
+		if pct, ok := transcribe.ParseWhisperProgress(msg.line); ok {
+			m.transcribeHasPct = true
+			m.transcribePct = float64(pct) / 100
+		} else {
+			m.transcribeLines = appendCapped(m.transcribeLines, msg.line, 3)
+		}
 		return m, awaitTranscribeCmd(m.transcribeJob)
 
 	case transcribeDoneMsg:
@@ -295,6 +313,8 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateKeyTranscribing(msg)
 	case modeTranscribeError:
 		return m.updateKeyReturn(msg)
+	case modeHelp:
+		return m.updateKeyHelp(msg)
 	default:
 		return m.updateKeyList(msg)
 	}
@@ -325,8 +345,12 @@ func (m Model) updateKeyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		m.nameInput = textinput.New()
 		m.nameInput.Placeholder = "recording name, enter for timestamp"
+		m.nameFormMode = captureMixed
 		m.mode = modeNameForm
 		return m, m.nameInput.Focus()
+	case "?":
+		m.mode = modeHelp
+		return m, nil
 	case "enter":
 		rec, ok := m.selectedRecord()
 		if !ok {
@@ -389,8 +413,12 @@ func (m Model) updateKeyNameForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.mode = modeList
 		return m, nil
+	case "tab":
+		m.nameFormMode = nextCaptureMode(m.nameFormMode)
+		return m, nil
 	case "enter":
-		return m, startRecordingCmd(m.cfg, record.Options{Name: m.nameInput.Value()})
+		micOnly, systemOnly := captureModeOptions(m.nameFormMode)
+		return m, startRecordingCmd(m.cfg, record.Options{Name: m.nameInput.Value(), MicOnly: micOnly, SystemOnly: systemOnly})
 	}
 
 	var cmd tea.Cmd
@@ -437,6 +465,13 @@ func (m Model) updateKeyRecError(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m Model) updateKeyReturn(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	m.transcribeErr = nil
 	m.mode = m.transcribeReturn
+	return m, nil
+}
+
+// updateKeyHelp handles the help overlay: any key closes it, back to the
+// list -- the only screen it's reachable from.
+func (m Model) updateKeyHelp(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	m.mode = modeList
 	return m, nil
 }
 
@@ -530,6 +565,8 @@ func (m Model) startTranscribingScreen(rec records.Record) (Model, tea.Cmd) {
 	m.transcribeLines = nil
 	m.transcribeJob = nil
 	m.transcribeCancel = cancel
+	m.transcribePct = 0
+	m.transcribeHasPct = false
 	return m, tea.Batch(m.transcribeSpinner.Tick, startTranscribeRunCmd(ctx, m.cfg, rec))
 }
 
@@ -549,7 +586,16 @@ func (m Model) handleDeleteConfirmKey(msg tea.KeyPressMsg, rec records.Record) (
 		return m, nil
 	}
 	m.mode = modeList
-	return m, deleteCmd(rec, m.cfg.OutputDir)
+	return m, deleteCmd(rec, m.cfg.OutputDir, m.trashDir())
+}
+
+// trashDir is the user's ~/.Trash, or "" if the home directory couldn't be
+// resolved -- deleteCmd then falls back to permanent removal.
+func (m Model) trashDir() string {
+	if m.homeDir == "" {
+		return ""
+	}
+	return filepath.Join(m.homeDir, ".Trash")
 }
 
 func (m Model) handleOverwriteConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
@@ -656,7 +702,13 @@ func (m Model) handleTapExited(msg tapExitedMsg) (tea.Model, tea.Cmd) {
 
 	case m.stopRequested:
 		sess.Release()
-		status := truncatedPathLine("saved ", sess.RecordDir, m.contentWidth())
+		dur := time.Since(sess.Start).Seconds()
+		if b, err := os.ReadFile(filepath.Join(sess.RecordDir, "metadata.json")); err == nil {
+			if d, ok := records.ParseMetadata(b); ok {
+				dur = d
+			}
+		}
+		status := formatSavedStatus(dur, sess.RecordDir, m.homeDir, m.contentWidth())
 		if record.ShouldDiscard(time.Since(sess.Start)) {
 			_ = sess.Discard()
 			status = "discarded (shorter than 2s)"
@@ -698,7 +750,9 @@ func (m Model) View() tea.View {
 	case modeTranscribing:
 		body = m.transcribingView()
 	case modeTranscribeError:
-		body = bodyStyle(width).Render(fmt.Sprintf("transcription error\n\n%v", m.transcribeErr))
+		body = bodyStyle(width).Render("transcription error\n\n" + transcribe.FriendlyTranscribeError(m.transcribeErr, strings.Join(m.transcribeLines, "\n")))
+	case modeHelp:
+		body = m.helpView()
 	default:
 		body = m.listView()
 	}
@@ -754,10 +808,6 @@ func (m Model) renderStatus() string {
 		return errStyle.Render(msg)
 	}
 	return accentStyle.Render(msg)
-}
-
-func (m Model) nameFormView() string {
-	return "recording name, enter for timestamp\n\n" + m.nameInput.View()
 }
 
 func (m Model) detailView() string {
@@ -836,17 +886,25 @@ func (m Model) downloadingView() string {
 
 func (m Model) transcribingView() string {
 	elapsed := time.Since(m.transcribeStart)
-	label := "transcribing..."
-	if m.transcribePhase == transcribePreparing {
-		label = "preparing audio..."
-	}
 	width := m.contentWidth()
-	lines := []string{
-		m.transcribeSpinner.View() + " " + label + " " + records.FormatDuration(elapsed.Seconds()),
-		"",
-	}
+	lines := []string{m.transcribeHeadline(elapsed), ""}
 	lines = append(lines, wrapLines(m.transcribeLines, width)...)
 	return strings.Join(lines, "\n")
+}
+
+// transcribeHeadline renders modeTranscribing's first line: whisper-cli's
+// own progress bar and percentage once --print-progress has reported in,
+// falling back to the spinner (older whisper-cli builds without the flag,
+// or simply before the first progress line has arrived).
+func (m Model) transcribeHeadline(elapsed time.Duration) string {
+	elapsedStr := records.FormatDuration(elapsed.Seconds())
+	if m.transcribePhase == transcribePreparing {
+		return m.transcribeSpinner.View() + " preparing audio... " + elapsedStr
+	}
+	if m.transcribeHasPct {
+		return fmt.Sprintf("%s  %s", m.transcribeProgress.ViewAs(m.transcribePct), elapsedStr)
+	}
+	return m.transcribeSpinner.View() + " transcribing... " + elapsedStr
 }
 
 // wrapLines word-wraps each of lines to width, for body text (like a
@@ -900,7 +958,7 @@ func (m Model) footer() string {
 		case m.list.FilterState() == list.Filtering:
 			return clampWidth("enter apply · esc cancel", width)
 		case len(m.list.Items()) == 0:
-			return clampWidth("r rec · q quit", width)
+			return clampWidth("r rec · ? help · q/ctrl+c quit", width)
 		}
 	}
 	return clampWidth(footerFor(m.mode, width < footerCompactThreshold), width)
@@ -912,18 +970,18 @@ func footerFor(mode screen, compact bool) string {
 	switch mode {
 	case modeList:
 		if compact {
-			return "r rec · ⏎ detail · t txs · o fndr · d del · / flt · q/ctrl+c quit"
+			return "r rec · ⏎ detail · t txs · o fndr · d del · / flt · ? help · q/ctrl+c quit"
 		}
-		return "r rec · enter detail · t transcribe · o finder · d delete · / filter · q/ctrl+c quit"
+		return "r rec · enter detail · t transcribe · o finder · d delete · / filter · ? help · q/ctrl+c quit"
 	case modeDetail:
 		if compact {
 			return "t txs · o fndr · d del · esc list"
 		}
 		return "t transcribe · o finder · d delete · esc list"
 	case modeRecording:
-		return "s stop & save · x discard · ctrl+c stop & save"
+		return "s/q/ctrl+c stop & save · x discard"
 	case modeNameForm:
-		return "enter confirm · esc cancel"
+		return "enter confirm · tab mode · esc cancel"
 	case modeDownloading:
 		return "esc cancel download"
 	case modeTranscribing:
@@ -932,6 +990,8 @@ func footerFor(mode screen, compact bool) string {
 		return "y download · any other key cancel"
 	case modeRecError, modeTranscribeMissingWhisper, modeTranscribeError:
 		return "press any key to continue"
+	case modeHelp:
+		return "press any key to close"
 	default:
 		return ""
 	}
@@ -950,4 +1010,16 @@ func Run(cfg config.Config, recs []records.Record) error {
 func hyperlink(text, path string) string {
 	u := url.URL{Scheme: "file", Path: path}
 	return "\x1b]8;;" + u.String() + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
+// formatSavedStatus formats the status line shown right after a
+// stop-and-save: a checkmark, the recording's duration, and its directory as
+// a clickable, home-abbreviated path. The hyperlink's href stays the real
+// absolute path -- only the displayed text is abbreviated/truncated -- so a
+// shortened, "~"-prefixed label still opens the right place.
+func formatSavedStatus(durationSeconds float64, dir, homeDir string, width int) string {
+	prefix := "✓ saved " + records.FormatDuration(durationSeconds) + " · "
+	avail := width - len([]rune(prefix))
+	shown := truncateMiddle(abbreviateHome(dir, homeDir), avail)
+	return prefix + hyperlink(shown, dir)
 }

@@ -64,6 +64,12 @@ func TestDumpViews(t *testing.T) {
 	m.statusMsg = "saved /tmp/dump/2026-08-07-1430-cliente-eppi"
 	render(t, "list with ok status", m, 100, 30)
 
+	msRaw, _ := New(cfg, dumpRecs()).Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	ms := msRaw.(Model)
+	ms.homeDir = "/Users/alex"
+	ms.statusMsg = formatSavedStatus(2527, "/Users/alex/Recordings/nastro/2026-08-07-1430-cliente-eppi", ms.homeDir, ms.contentWidth())
+	render(t, "list with saved status (peak-end)", ms, 100, 30)
+
 	me := New(cfg, dumpRecs())
 	me.statusMsg = "error deleting x: permission denied"
 	me.statusIsErr = true
@@ -75,7 +81,31 @@ func TestDumpViews(t *testing.T) {
 
 	nf := New(cfg, dumpRecs())
 	nf.mode = modeNameForm
-	render(t, "name form", nf, 100, 30)
+	render(t, "name form (mixed, default)", nf, 100, 30)
+
+	nfm := New(cfg, dumpRecs())
+	nfm.mode = modeNameForm
+	nfm.nameFormMode = captureMicOnly
+	render(t, "name form (mode cycled via tab: mic-only)", nfm, 100, 30)
+
+	tr := New(cfg, dumpRecs())
+	tr.mode = modeTranscribing
+	tr.transcribePhase = transcribeRunning
+	tr.transcribeStart = time.Now().Add(-37 * time.Second)
+	tr.transcribeHasPct = true
+	tr.transcribePct = 0.45
+	render(t, "transcribing (progress bar)", tr, 100, 30)
+
+	trs := New(cfg, dumpRecs())
+	trs.mode = modeTranscribing
+	trs.transcribePhase = transcribePreparing
+	trs.transcribeStart = time.Now().Add(-3 * time.Second)
+	render(t, "transcribing (preparing audio, spinner fallback)", trs, 100, 30)
+
+	hp := New(cfg, dumpRecs())
+	hp.mode = modeHelp
+	hp.homeDir = "/Users/alex"
+	render(t, "help overlay", hp, 100, 30)
 
 	dt := New(cfg, dumpRecs())
 	dt.mode = modeDetail

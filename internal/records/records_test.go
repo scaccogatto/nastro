@@ -8,6 +8,31 @@ import (
 	"time"
 )
 
+func TestParseMetadata(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		wantDur float64
+		wantOK  bool
+	}{
+		{"valid", `{"duration_seconds": 42.5}`, 42.5, true},
+		{"missing field defaults to zero", `{}`, 0, true},
+		{"malformed json", `not json`, 0, false},
+		{"empty", ``, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDur, gotOK := ParseMetadata([]byte(tt.content))
+			if gotOK != tt.wantOK {
+				t.Fatalf("ParseMetadata(%q) ok = %v, want %v", tt.content, gotOK, tt.wantOK)
+			}
+			if gotOK && gotDur != tt.wantDur {
+				t.Errorf("ParseMetadata(%q) duration = %v, want %v", tt.content, gotDur, tt.wantDur)
+			}
+		})
+	}
+}
+
 func TestParseDirName(t *testing.T) {
 	tests := []struct {
 		name     string

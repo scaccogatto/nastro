@@ -86,11 +86,8 @@ func buildRecord(dirPath, id string, date time.Time, slug string) Record {
 	}
 
 	if b, err := os.ReadFile(filepath.Join(dirPath, "metadata.json")); err == nil {
-		var meta struct {
-			DurationSeconds float64 `json:"duration_seconds"`
-		}
-		if json.Unmarshal(b, &meta) == nil {
-			rec.DurationSeconds = meta.DurationSeconds
+		if d, ok := ParseMetadata(b); ok {
+			rec.DurationSeconds = d
 			rec.HasDuration = true
 		}
 	}
@@ -100,6 +97,18 @@ func buildRecord(dirPath, id string, date time.Time, slug string) Record {
 	}
 
 	return rec
+}
+
+// ParseMetadata parses metadata.json's content (as written by nastro-tap),
+// returning its duration_seconds and whether parsing succeeded.
+func ParseMetadata(b []byte) (durationSeconds float64, ok bool) {
+	var meta struct {
+		DurationSeconds float64 `json:"duration_seconds"`
+	}
+	if json.Unmarshal(b, &meta) != nil {
+		return 0, false
+	}
+	return meta.DurationSeconds, true
 }
 
 // FormatDuration renders seconds as mm:ss, or h:mm:ss past an hour.

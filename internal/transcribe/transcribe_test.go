@@ -112,6 +112,123 @@ func TestDownloadPercent(t *testing.T) {
 	}
 }
 
+func TestParseWhisperProgress(t *testing.T) {
+	tests := []struct {
+		name    string
+		line    string
+		wantPct int
+		wantOK  bool
+	}{
+		{"typical line", "whisper_print_progress_callback: progress = 45%", 45, true},
+		{"zero", "whisper_print_progress_callback: progress = 0%", 0, true},
+		{"complete", "whisper_print_progress_callback: progress = 100%", 100, true},
+		{"leading/trailing whitespace", "  whisper_print_progress_callback: progress = 12%  ", 12, true},
+		{"unrelated line", "whisper_model_load: n_mels = 128", 0, false},
+		{"blank line", "", 0, false},
+		{"malformed percentage", "whisper_print_progress_callback: progress = abc%", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPct, gotOK := ParseWhisperProgress(tt.line)
+			if gotOK != tt.wantOK {
+				t.Fatalf("ParseWhisperProgress(%q) ok = %v, want %v", tt.line, gotOK, tt.wantOK)
+			}
+			if gotOK && gotPct != tt.wantPct {
+				t.Errorf("ParseWhisperProgress(%q) pct = %d, want %d", tt.line, gotPct, tt.wantPct)
+			}
+		})
+	}
+}
+
+func TestFriendlyTranscribeError(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		output    string
+		wantEmpty bool
+		wantParts []string
+	}{
+		{
+			name:      "nil error",
+			err:       nil,
+			wantEmpty: true,
+		},
+		{
+			name:      "afconvert failure",
+			err:       errors.New("afconvert: exit status 1: ExtAudioFile: bad property size"),
+			wantParts: []string{"audio conversion failed", "may be corrupted or empty", "afconvert: exit status 1: ExtAudioFile: bad property size"},
+		},
+		{
+			name:      "whisper failure mentioning memory",
+			err:       errors.New("exit status 134"),
+			output:    "ggml_metal: failed to allocate memory for model buffer",
+			wantParts: []string{"try a smaller model", "~/.config/nastro/config.toml", "exit status 134"},
+		},
+		{
+			name:      "whisper failure mentioning model in the error itself",
+			err:       errors.New("model file could not be loaded"),
+			wantParts: []string{"try a smaller model", "~/.config/nastro/config.toml"},
+		},
+		{
+			name:      "whisper failure, no known cause",
+			err:       errors.New("exit status 1"),
+			output:    "some unrelated whisper-cli chatter",
+			wantParts: []string{"exit status 1", "some unrelated whisper-cli chatter"},
+		},
+		{
+			name:      "whisper failure with no captured output",
+			err:       errors.New("exit status 1"),
+			wantParts: []string{"exit status 1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FriendlyTranscribeError(tt.err, tt.output)
+			if tt.wantEmpty {
+				if got != "" {
+					t.Errorf("FriendlyTranscribeError() = %q, want empty", got)
+				}
+				return
+			}
+			for _, part := range tt.wantParts {
+				if !strings.Contains(got, part) {
+					t.Errorf("FriendlyTranscribeError() = %q, want it to contain %q", got, part)
+				}
+			}
+			if strings.Contains(got, "exit status 1: exit status 1") {
+				t.Errorf("FriendlyTranscribeError() = %q, looks duplicated", got)
+			}
+		})
+	}
+}
+
+func TestStartWhisperEnablesPrintProgress(t *testing.T) {
+	scriptDir := t.TempDir()
+	argsFile := filepath.Join(scriptDir, "args.txt")
+	script := "#!/bin/sh\necho \"$*\" > " + argsFile + "\n"
+	if err := os.WriteFile(filepath.Join(scriptDir, "whisper-cli"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake whisper-cli: %v", err)
+	}
+	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
+
+	job, err := StartWhisper(context.Background(), "model.bin", "en", filepath.Join(t.TempDir(), "transcript"), "audio.wav")
+	if err != nil {
+		t.Fatalf("StartWhisper: %v", err)
+	}
+	if err := <-job.Wait(); err != nil {
+		t.Fatalf("Wait(): %v", err)
+	}
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	if !strings.Contains(string(got), "-pp") {
+		t.Errorf("whisper-cli args = %q, want it to contain -pp (--print-progress)", got)
+	}
+}
+
 func TestStartModelDownloadSuccess(t *testing.T) {
 	content := strings.Repeat("nastro-model-bytes", 1000)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

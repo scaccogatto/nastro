@@ -8,12 +8,14 @@ package transcribe
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/scaccogatto/nastro/internal/config"
@@ -71,6 +73,61 @@ func DownloadPercent(downloaded, total int64) float64 {
 	}
 }
 
+// whisperProgressPrefix is the line prefix whisper-cli's --print-progress
+// emits progress updates on.
+const whisperProgressPrefix = "whisper_print_progress_callback: progress = "
+
+// ParseWhisperProgress parses one line of whisper-cli's combined
+// stdout/stderr for a --print-progress update ("whisper_print_progress_callback:
+// progress = 45%"), returning the percentage (0..100) and ok=true if line is
+// one. Anything else -- the bulk of whisper-cli's output -- is ok=false.
+func ParseWhisperProgress(line string) (percent int, ok bool) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(line), whisperProgressPrefix)
+	if !ok {
+		return 0, false
+	}
+	rest = strings.TrimSuffix(strings.TrimSpace(rest), "%")
+	pct, err := strconv.Atoi(rest)
+	if err != nil {
+		return 0, false
+	}
+	return pct, true
+}
+
+// mentionsMemoryOrModel reports whether s (an error message, or captured
+// whisper-cli output) hints at a memory/model-sizing problem, the one case
+// FriendlyTranscribeError has specific guidance for.
+func mentionsMemoryOrModel(s string) bool {
+	s = strings.ToLower(s)
+	return strings.Contains(s, "memory") || strings.Contains(s, "model")
+}
+
+// FriendlyTranscribeError turns a transcribe run failure into an
+// actionable, user-facing message in place of a bare exit code. err is the
+// failure from ConvertToWav (afconvert) or a whisper-cli run's Job.Wait();
+// output is whatever whisper-cli output was captured alongside it (unused
+// for an afconvert failure: ConvertToWav already folds its own output into
+// err). Returns "" for a nil err.
+func FriendlyTranscribeError(err error, output string) string {
+	if err == nil {
+		return ""
+	}
+
+	msg := err.Error()
+	if detail, ok := strings.CutPrefix(msg, "afconvert: "); ok {
+		return fmt.Sprintf("audio conversion failed - the recording may be corrupted or empty (afconvert: %s)", detail)
+	}
+
+	detail := strings.TrimSpace(output)
+	if mentionsMemoryOrModel(msg + " " + detail) {
+		return fmt.Sprintf("transcription failed (%s): try a smaller model in ~/.config/nastro/config.toml", msg)
+	}
+	if detail == "" {
+		return fmt.Sprintf("transcription failed: %s", msg)
+	}
+	return fmt.Sprintf("transcription failed: %s: %s", msg, detail)
+}
+
 // --- everything below is side-effecting orchestration: subprocess exec,
 // network I/O, filesystem. Deliberately outside TDD scope, except for pure
 // helpers pulled out along the way (DownloadPercent), which are. ---
@@ -126,7 +183,7 @@ func (j *Job) Wait() <-chan error { return j.waitErr }
 // partial .txt/.srt it had written, so a canceled job never leaves a
 // half-written transcript behind.
 func StartWhisper(ctx context.Context, modelPath, lang, outPrefix, wavPath string) (*Job, error) {
-	cmd := exec.CommandContext(ctx, "whisper-cli", "-m", modelPath, "-l", lang, "-otxt", "-osrt", "-of", outPrefix, "-f", wavPath)
+	cmd := exec.CommandContext(ctx, "whisper-cli", "-m", modelPath, "-l", lang, "-otxt", "-osrt", "-of", outPrefix, "-pp", "-f", wavPath)
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -316,7 +373,7 @@ func Run(cfg config.Config, idOrLast string) error {
 	defer os.Remove(tmpWavPath)
 
 	if err := ConvertToWav(context.Background(), audioPath, tmpWavPath); err != nil {
-		return err
+		return errors.New(FriendlyTranscribeError(err, ""))
 	}
 
 	modelPath := ModelPath(home, cfg.WhisperModel)
@@ -324,11 +381,14 @@ func Run(cfg config.Config, idOrLast string) error {
 	if err != nil {
 		return err
 	}
+	var output strings.Builder
 	for line := range job.Lines() {
 		fmt.Println(line)
+		output.WriteString(line)
+		output.WriteByte('\n')
 	}
 	if err := <-job.Wait(); err != nil {
-		return fmt.Errorf("whisper-cli: %w", err)
+		return errors.New(FriendlyTranscribeError(err, output.String()))
 	}
 	return nil
 }
