@@ -1,8 +1,9 @@
 // Package transcribe implements `nastro transcribe <id|last>`: resolving the
-// target record and driving whisper-cli via afconvert. Its phases (check
-// whisper-cli, check model, convert, run, download) are exposed as separate,
-// reusable functions so the TUI can drive them without going through the
-// CLI's stdin-prompt flow.
+// target record and driving one of two backends via afconvert -- whisperx
+// (default, with speaker diarization) or whisper-cli. Its phases (check
+// prereqs, convert, run, download) are exposed as separate, reusable
+// functions so the TUI can drive them without going through the CLI's
+// stdin-prompt flow.
 package transcribe
 
 import (
@@ -143,6 +144,58 @@ func CheckWhisperCLI() bool {
 func CheckModel(homeDir, model string) bool {
 	_, err := os.Stat(ModelPath(homeDir, model))
 	return err == nil
+}
+
+// whisperCLIMissingMsg is the guided error shown when whisper-cli isn't on
+// PATH -- shared by Run and the TUI's prereq check.
+const whisperCLIMissingMsg = "whisper-cli not found. Install it with: brew install whisper-cpp"
+
+// PrereqStatus reports whether cfg's configured backend is ready to
+// transcribe. MissingMsg is a guided, user-facing message for a hard
+// prerequisite that isn't fixable in-app (the backend binary itself, or
+// whisperx's HF token). ModelMissing/ModelPath cover whisper-cli's local
+// ggml model, the one prerequisite the TUI can offer to download.
+type PrereqStatus struct {
+	MissingMsg   string
+	ModelMissing bool
+	ModelPath    string
+}
+
+// CheckPrereqs checks cfg's configured backend's prerequisites -- the one
+// seam Run and the TUI's prereq check share, so the whisper-cli/whisperx
+// branch only lives here.
+func CheckPrereqs(cfg config.Config) PrereqStatus {
+	if cfg.Transcriber == "whisperx" {
+		if !CheckWhisperX() {
+			return PrereqStatus{MissingMsg: WhisperXMissingMsg}
+		}
+		if cfg.ResolvedHFToken() == "" {
+			return PrereqStatus{MissingMsg: MissingHFTokenMessage()}
+		}
+		return PrereqStatus{}
+	}
+
+	if !CheckWhisperCLI() {
+		return PrereqStatus{MissingMsg: whisperCLIMissingMsg}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return PrereqStatus{MissingMsg: whisperCLIMissingMsg}
+	}
+	if !CheckModel(home, cfg.WhisperModel) {
+		return PrereqStatus{ModelMissing: true, ModelPath: ModelPath(home, cfg.WhisperModel)}
+	}
+	return PrereqStatus{}
+}
+
+// StartTranscribeBackend dispatches to the configured backend -- whisper-cli
+// or whisperx -- the one seam Run and the TUI's transcribe command share.
+// home is only used by whisper-cli, to resolve its local model path.
+func StartTranscribeBackend(ctx context.Context, cfg config.Config, home, outPrefix, wavPath string) (*Job, error) {
+	if cfg.Transcriber == "whisperx" {
+		return StartWhisperX(ctx, cfg.ResolvedHFToken(), cfg.Lang, cfg.WhisperModel, outPrefix, wavPath)
+	}
+	return StartWhisper(ctx, ModelPath(home, cfg.WhisperModel), cfg.Lang, outPrefix, wavPath)
 }
 
 // ConvertToWav converts audioPath (the recording's .m4a) to a 16kHz mono
@@ -344,10 +397,11 @@ func runDownload(ctx context.Context, url, destPath string, progress chan<- Down
 }
 
 // Run resolves idOrLast against cfg.OutputDir and transcribes it with
-// whisper-cli, converting the source audio to WAV via afconvert first. Its
-// overwrite confirmation reads from stdin directly: the CLI is the one
-// caller that's expected to (the TUI drives the same phases itself, with an
-// inline y/n instead).
+// cfg.Transcriber's backend (whisperx by default, or whisper-cli),
+// converting the source audio to WAV via afconvert first. Its overwrite
+// confirmation reads from stdin directly: the CLI is the one caller that's
+// expected to (the TUI drives the same phases itself, with an inline y/n
+// instead).
 func Run(cfg config.Config, idOrLast string) error {
 	recs, err := records.Scan(cfg.OutputDir)
 	if err != nil {
@@ -358,17 +412,18 @@ func Run(cfg config.Config, idOrLast string) error {
 		return err
 	}
 
-	if !CheckWhisperCLI() {
-		return fmt.Errorf("whisper-cli not found. Install it with: brew install whisper-cpp")
+	status := CheckPrereqs(cfg)
+	if status.MissingMsg != "" {
+		return errors.New(status.MissingMsg)
+	}
+	if status.ModelMissing {
+		return fmt.Errorf("whisper model not found at %s\ndownload it from: %s",
+			status.ModelPath, ModelDownloadURL(cfg.WhisperModel))
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve home dir: %w", err)
-	}
-	if !CheckModel(home, cfg.WhisperModel) {
-		return fmt.Errorf("whisper model not found at %s\ndownload it from: %s",
-			ModelPath(home, cfg.WhisperModel), ModelDownloadURL(cfg.WhisperModel))
 	}
 
 	recordDir := filepath.Join(cfg.OutputDir, rec.ID)
@@ -396,8 +451,7 @@ func Run(cfg config.Config, idOrLast string) error {
 		return errors.New(FriendlyTranscribeError(err, ""))
 	}
 
-	modelPath := ModelPath(home, cfg.WhisperModel)
-	job, err := StartWhisper(context.Background(), modelPath, cfg.Lang, filepath.Join(recordDir, "transcript"), tmpWavPath)
+	job, err := StartTranscribeBackend(context.Background(), cfg, home, filepath.Join(recordDir, "transcript"), tmpWavPath)
 	if err != nil {
 		return err
 	}

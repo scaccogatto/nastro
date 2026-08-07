@@ -25,7 +25,7 @@ var helpSections = []helpSection{
 	{"downloading model", []string{"esc cancel download", "ctrl+c cancel download"}},
 	{"transcribing", []string{"esc cancel", "ctrl+c cancel"}},
 	{"download confirm", []string{"y download", "q/any other key cancel"}},
-	{"message screens (missing whisper-cli, errors)", []string{"any key continue"}},
+	{"message screens (missing prereqs, errors)", []string{"any key continue"}},
 }
 
 // helpContent renders the help overlay's full text: every screen's
@@ -48,9 +48,12 @@ func helpContent(m Model) string {
 	lines = append(lines,
 		"  output dir: "+abbreviateHome(m.cfg.OutputDir, m.homeDir),
 		"  config: "+abbreviateHome(filepath.Join(m.homeDir, ".config", "nastro", "config.toml"), m.homeDir),
-		"  whisper model: "+abbreviateHome(transcribe.ModelPath(m.homeDir, m.cfg.WhisperModel), m.homeDir),
-		"",
+		"  transcriber: "+m.cfg.Transcriber,
 	)
+	if m.cfg.Transcriber != "whisperx" {
+		lines = append(lines, "  whisper model: "+abbreviateHome(transcribe.ModelPath(m.homeDir, m.cfg.WhisperModel), m.homeDir))
+	}
+	lines = append(lines, "")
 
 	lines = append(lines, "recordings survive crashes: audio is written incrementally")
 

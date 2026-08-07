@@ -13,6 +13,7 @@ func TestDefault(t *testing.T) {
 		OutputDir:    filepath.Join("/home/user", "Recordings", "nastro"),
 		WhisperModel: "large-v3-turbo",
 		Lang:         "it",
+		Transcriber:  "whisperx",
 	}
 	if got != want {
 		t.Errorf("Default(%q) = %+v, want %+v", "/home/user", got, want)
@@ -47,6 +48,7 @@ func TestLoadFrom(t *testing.T) {
 				OutputDir:    filepath.Join("/home/user", "Recordings", "nastro"),
 				WhisperModel: "large-v3-turbo",
 				Lang:         "en",
+				Transcriber:  "whisperx",
 			},
 		},
 		{
@@ -55,12 +57,16 @@ func TestLoadFrom(t *testing.T) {
 output_dir = "/custom/dir"
 whisper_model = "small"
 lang = "fr"
+transcriber = "whisper-cli"
+hf_token = "hf_secret"
 `,
 			homeDir: "/home/user",
 			want: Config{
 				OutputDir:    "/custom/dir",
 				WhisperModel: "small",
 				Lang:         "fr",
+				Transcriber:  "whisper-cli",
+				HFToken:      "hf_secret",
 			},
 		},
 		{
@@ -97,6 +103,29 @@ lang = "fr"
 			}
 			if got != tt.want {
 				t.Errorf("LoadFrom() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolvedHFToken(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfgToken  string
+		envToken  string
+		wantToken string
+	}{
+		{"config field wins over env", "hf_config", "hf_env", "hf_config"},
+		{"empty field falls back to env", "", "hf_env", "hf_env"},
+		{"both empty", "", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HF_TOKEN", tt.envToken)
+			cfg := Config{HFToken: tt.cfgToken}
+			if got := cfg.ResolvedHFToken(); got != tt.wantToken {
+				t.Errorf("ResolvedHFToken() = %q, want %q", got, tt.wantToken)
 			}
 		})
 	}

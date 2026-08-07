@@ -12,30 +12,21 @@ import (
 	"github.com/scaccogatto/nastro/internal/transcribe"
 )
 
-// transcribePrereqMsg reports whether whisper-cli and the configured model
-// are available, before actually starting a transcribe run.
+// transcribePrereqMsg reports whether the configured backend (whisper-cli
+// or whisperx) is ready to transcribe, before actually starting a run.
 type transcribePrereqMsg struct {
-	whisperMissing bool
-	modelMissing   bool
-	modelPath      string
+	missingMsg   string // non-empty: guided message, route to modeTranscribeMissingPrereq
+	modelMissing bool
+	modelPath    string
 }
 
-// checkTranscribePrereqsCmd checks whisper-cli and the configured model in
+// checkTranscribePrereqsCmd checks the configured backend's prerequisites in
 // one round-trip, so the TUI can route to the right screen (message, model
 // download offer, or straight to transcribing).
 func checkTranscribePrereqsCmd(cfg config.Config) tea.Cmd {
 	return func() tea.Msg {
-		if !transcribe.CheckWhisperCLI() {
-			return transcribePrereqMsg{whisperMissing: true}
-		}
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return transcribePrereqMsg{whisperMissing: true}
-		}
-		if !transcribe.CheckModel(home, cfg.WhisperModel) {
-			return transcribePrereqMsg{modelMissing: true, modelPath: transcribe.ModelPath(home, cfg.WhisperModel)}
-		}
-		return transcribePrereqMsg{}
+		status := transcribe.CheckPrereqs(cfg)
+		return transcribePrereqMsg{missingMsg: status.MissingMsg, modelMissing: status.ModelMissing, modelPath: status.ModelPath}
 	}
 }
 
@@ -99,8 +90,7 @@ func startTranscribeRunCmd(ctx context.Context, cfg config.Config, rec records.R
 			return transcribeStartedMsg{err: err}
 		}
 
-		modelPath := transcribe.ModelPath(home, cfg.WhisperModel)
-		job, err := transcribe.StartWhisper(ctx, modelPath, cfg.Lang, filepath.Join(recordDir, "transcript"), tmpWavPath)
+		job, err := transcribe.StartTranscribeBackend(ctx, cfg, home, filepath.Join(recordDir, "transcript"), tmpWavPath)
 		if err != nil {
 			os.Remove(tmpWavPath)
 			return transcribeStartedMsg{err: err}

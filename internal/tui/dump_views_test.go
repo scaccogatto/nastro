@@ -138,7 +138,7 @@ func TestDumpViews(t *testing.T) {
 	render(t, "download confirm", dl, 100, 30)
 
 	mw := New(cfg, dumpRecs())
-	mw.mode = modeTranscribeMissingWhisper
+	mw.mode = modeTranscribeMissingPrereq
 	render(t, "missing whisper-cli", mw, 100, 30)
 
 	te := New(cfg, dumpRecs())

@@ -87,19 +87,42 @@ con status che lo dichiara (`trash unavailable, deleted permanently: <id>`).
 
 ## Flusso: transcribe
 
+Backend selezionato da config (`transcriber`): **whisperx** (default, con
+speaker diarization) o **whisper-cli** (nessuna diarization, fallback).
+
 1. `nastro transcribe last` (o `t` dalla lista)
-2. Modello assente → download ggml con progress e size stimata (una tantum), annullabile
+2. Controllo prerequisiti del backend configurato:
+   - **whisperx**: binario `whisperx` sul PATH (altrimenti: "whisperx not
+     found. Install it with: uv tool install whisperx"); token HuggingFace
+     (`hf_token` in config, o `$HF_TOKEN` se il campo è vuoto) altrimenti
+     messaggio guidato con link per crearne uno, accettare i termini del
+     modello di diarization gated, e dove incollarlo nel TOML
+   - **whisper-cli**: binario `whisper-cli` sul PATH, poi modello ggml
+     assente → download con progress e size stimata (una tantum),
+     annullabile (whisperx gestisce i propri modelli da sé, nessun download
+     esplicito in nastro)
 3. Conversione audio (afconvert): spinner "preparing audio…", annullabile
-4. whisper-cli in subprocess (con `--print-progress`): barra di progresso + percentuale in TUI una volta arrivata la prima riga di progresso, spinner come fallback finché non arriva (o su build di whisper-cli senza la flag); stessa progressione visibile su stdout in headless. Annullabile.
-5. Output: `transcript.txt` + `transcript.srt` nella dir del record
+4. Backend in subprocess:
+   - **whisper-cli** (con `--print-progress`): barra di progresso +
+     percentuale in TUI una volta arrivata la prima riga di progresso,
+     spinner come fallback finché non arriva (o su build senza la flag)
+   - **whisperx**: nessuna percentuale affidabile; spinner + ultime righe
+     di output (stessa UI, niente barra di progresso)
+   Stessa progressione visibile su stdout in headless. Annullabile.
+5. Output: `transcript.txt` + `transcript.srt` nella dir del record. Con
+   whisperx, ogni riga/blocco è prefissato dallo speaker rilevato (es.
+   `[SPEAKER_00] testo...`), raggruppando segmenti consecutivi dello stesso
+   speaker; con whisper-cli, nessun prefisso (nessuna diarization)
 6. Notifica macOS a fine job (should)
 
-Default da config: `model = "large-v3-turbo"`, `lang = "it"`.
+Default da config: `transcriber = "whisperx"`, `model = "large-v3-turbo"`,
+`lang = "it"`.
 
-Un fallimento (afconvert o whisper-cli) non espone mai l'errore grezzo
-("afconvert: exit status 1" nudo): viene tradotto in un messaggio azionabile
-(causa più probabile, suggerimento di ridurre il modello se il fallimento
-sembra di memoria, altrimenti il dettaglio catturato), sia in TUI che da CLI.
+Un fallimento (afconvert o il backend di trascrizione) non espone mai
+l'errore grezzo ("afconvert: exit status 1" nudo): viene tradotto in un
+messaggio azionabile (causa più probabile, suggerimento di ridurre il
+modello se il fallimento sembra di memoria, altrimenti il dettaglio
+catturato), sia in TUI che da CLI.
 
 ## Primo avvio (onboarding minimo)
 
@@ -115,7 +138,8 @@ sembra di memoria, altrimenti il dettaglio catturato), sia in TUI che da CLI.
 | Due `record` contemporanei | Rifiutato con errore chiaro (lockfile) |
 | Disco < 1GB | Warning prima di partire |
 | Transcribe di un record già trascritto | Chiede conferma overwrite, nominando il record |
-| Ctrl+C / esc durante transcribe | Annulla il job (whisper-cli/afconvert), pulisce l'output parziale, torna alla schermata di provenienza |
+| Ctrl+C / esc durante transcribe | Annulla il job (backend/afconvert), pulisce l'output parziale, torna alla schermata di provenienza |
+| Crash/kill del processo di trascrizione (non richiesto da nastro) | Stesso comportamento di un annullamento esplicito: il transcript preesistente non viene mai toccato prima che il nuovo sia completo (whisperx scrive solo un JSON intermedio in una dir temporanea, mai vicino a `transcript.txt/.srt`; la promozione è atomica e avviene solo a fine parsing riuscito) |
 | Record vuoto (0 byte / <2s) | Non salvato, dir rimossa |
 | `d` (elimina) | Sposta in `~/.Trash` (recuperabile); fallback a cancellazione permanente solo se lo spostamento fallisce, dichiarato nello status |
 

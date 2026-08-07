@@ -11,8 +11,8 @@ Contesto d'uso: call Google Meet in italiano con clienti, da Ghostty/herdr, tutt
 | Scrittura incrementale | il file è valido anche dopo crash/kill: mai perdere una call |
 | Output ordinato | `~/Recordings/nastro/<YYYY-MM-DD-HHmm>-<slug>/audio.m4a` |
 | `nastro records` | lista: data, slug, durata, size, stato transcript (✓/-) |
-| `nastro transcribe <id\|last>` | whisper.cpp, `-l it` di default, output `.txt` + `.srt` accanto all'audio |
-| Config TOML | `~/.config/nastro/config.toml`: output dir, modello, lingua |
+| `nastro transcribe <id\|last>` | whisperx (default) con speaker diarization, `-l it` di default, output `.txt` + `.srt` con prefisso `[SPEAKER_NN]` accanto all'audio; richiede un token HuggingFace (`hf_token` in config o `$HF_TOKEN`). `transcriber = "whisper-cli"` in config torna al backend senza diarization |
+| Config TOML | `~/.config/nastro/config.toml`: output dir, modello, lingua, backend (`transcriber`), `hf_token` |
 | Timer + livelli in TUI | feedback che sta davvero registrando (VU meter basico) |
 
 ## Should (v0.2)
@@ -30,7 +30,6 @@ Contesto d'uso: call Google Meet in italiano con clienti, da Ghostty/herdr, tutt
 | Feature | Note |
 |---|---|
 | Video opzionale (`record --video`) | ScreenCaptureKit; il file cresce, va reso esplicito |
-| Diarization vera | whisper.cpp non la fa; valutare pyannote/whisperX quando servirà |
 | Export markdown | transcript + metadati pronti per Obsidian/note cliente |
 
 ## Won't (deliberato)

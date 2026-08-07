@@ -59,7 +59,7 @@ const (
 	modeRecError
 	modeNameForm
 	modeDetail
-	modeTranscribeMissingWhisper
+	modeTranscribeMissingPrereq
 	modeTranscribeDownloadConfirm
 	modeDownloading
 	modeTranscribing
@@ -117,21 +117,22 @@ type Model struct {
 	confirmDelete bool
 
 	// transcribe flow, triggered from the list or detail screen
-	transcribeTarget   records.Record
-	transcribeReturn   screen
-	confirmOverwrite   bool
-	pendingModelPath   string
-	transcribeErr      error
-	transcribeStart    time.Time
-	transcribePhase    transcribePhase
-	transcribeSpinner  spinner.Model
-	transcribeLines    []string
-	transcribeJob      *transcribe.Job
-	transcribeTmpWav   string
-	transcribeCancel   context.CancelFunc
-	transcribeProgress progress.Model
-	transcribePct      float64
-	transcribeHasPct   bool
+	transcribeTarget     records.Record
+	transcribeReturn     screen
+	confirmOverwrite     bool
+	pendingModelPath     string
+	transcribeMissingMsg string // guided message shown on modeTranscribeMissingPrereq
+	transcribeErr        error
+	transcribeStart      time.Time
+	transcribePhase      transcribePhase
+	transcribeSpinner    spinner.Model
+	transcribeLines      []string
+	transcribeJob        *transcribe.Job
+	transcribeTmpWav     string
+	transcribeCancel     context.CancelFunc
+	transcribeProgress   progress.Model
+	transcribePct        float64
+	transcribeHasPct     bool
 
 	downloadJob      *transcribe.DownloadJob
 	downloadPct      float64
@@ -327,7 +328,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateKeyNameForm(msg)
 	case modeDetail:
 		return m.updateKeyDetail(msg)
-	case modeTranscribeMissingWhisper:
+	case modeTranscribeMissingPrereq:
 		return m.updateKeyReturn(msg)
 	case modeTranscribeDownloadConfirm:
 		return m.updateKeyDownloadConfirm(msg)
@@ -484,7 +485,7 @@ func (m Model) updateKeyRecError(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, rescanCmd(m.cfg.OutputDir, "", false)
 }
 
-// updateKeyReturn handles a message screen (missing whisper-cli, a
+// updateKeyReturn handles a message screen (a missing prerequisite, a
 // transcribe error): any key returns to wherever the transcribe flow was
 // triggered from.
 func (m Model) updateKeyReturn(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -669,8 +670,9 @@ func (m Model) handleOverwriteConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 
 func (m Model) handleTranscribePrereq(msg transcribePrereqMsg) (Model, tea.Cmd) {
 	switch {
-	case msg.whisperMissing:
-		m.mode = modeTranscribeMissingWhisper
+	case msg.missingMsg != "":
+		m.transcribeMissingMsg = msg.missingMsg
+		m.mode = modeTranscribeMissingPrereq
 		return m, nil
 	case msg.modelMissing:
 		m.pendingModelPath = msg.modelPath
@@ -811,8 +813,8 @@ func (m Model) View() tea.View {
 		body = m.nameFormView()
 	case modeDetail:
 		body = m.detailView()
-	case modeTranscribeMissingWhisper:
-		body = bodyStyle(width).Render("whisper-cli not found.\n\nInstall it with: brew install whisper-cpp")
+	case modeTranscribeMissingPrereq:
+		body = bodyStyle(width).Render(m.transcribeMissingMsg)
 	case modeTranscribeDownloadConfirm:
 		body = bodyStyle(width).Render(formatDownloadPrompt(m.cfg.WhisperModel))
 	case modeDownloading:
@@ -1110,7 +1112,7 @@ func footerFor(mode screen, compact bool) string {
 		return "esc cancel · ctrl+c cancel"
 	case modeTranscribeDownloadConfirm:
 		return "y download · any other key cancel"
-	case modeRecError, modeTranscribeMissingWhisper, modeTranscribeError:
+	case modeRecError, modeTranscribeMissingPrereq, modeTranscribeError:
 		return "press any key to continue"
 	case modeHelp:
 		return "press any key to close"

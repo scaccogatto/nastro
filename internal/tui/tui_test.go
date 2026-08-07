@@ -244,7 +244,7 @@ func TestAppendCapped(t *testing.T) {
 func TestFooterForKnownModesNonEmpty(t *testing.T) {
 	modes := []screen{
 		modeList, modeDetail, modeRecording, modeNameForm, modeDownloading,
-		modeTranscribing, modeRecError, modeTranscribeMissingWhisper,
+		modeTranscribing, modeRecError, modeTranscribeMissingPrereq,
 		modeTranscribeDownloadConfirm, modeTranscribeError, modeHelp,
 	}
 	for _, mode := range modes {
@@ -423,9 +423,13 @@ func TestOverwriteConfirmYProceedsToPrereqCheck(t *testing.T) {
 func TestHandleTranscribePrereqWhisperMissing(t *testing.T) {
 	m := Model{mode: modeList, transcribeReturn: modeList}
 
-	newModel, cmd := m.Update(transcribePrereqMsg{whisperMissing: true})
-	if newModel.(Model).mode != modeTranscribeMissingWhisper {
-		t.Errorf("mode = %v, want modeTranscribeMissingWhisper", newModel.(Model).mode)
+	newModel, cmd := m.Update(transcribePrereqMsg{missingMsg: "whisper-cli not found"})
+	nm := newModel.(Model)
+	if nm.mode != modeTranscribeMissingPrereq {
+		t.Errorf("mode = %v, want modeTranscribeMissingPrereq", nm.mode)
+	}
+	if nm.transcribeMissingMsg != "whisper-cli not found" {
+		t.Errorf("transcribeMissingMsg = %q, want %q", nm.transcribeMissingMsg, "whisper-cli not found")
 	}
 	if cmd != nil {
 		t.Errorf("cmd = %v, want nil", cmd)
