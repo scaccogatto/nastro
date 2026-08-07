@@ -2,7 +2,12 @@ package record
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,4 +119,124 @@ func TestAcquireLockErrorIsDescriptive(t *testing.T) {
 	if !errors.Is(err, ErrAlreadyLocked) {
 		t.Errorf("AcquireLock() second call error = %v, want wrapping ErrAlreadyLocked", err)
 	}
+}
+
+func TestAcquireLockWritesCurrentPID(t *testing.T) {
+	dir := t.TempDir()
+	f, err := AcquireLock(dir)
+	if err != nil {
+		t.Fatalf("AcquireLock() error: %v", err)
+	}
+	defer ReleaseLock(f, dir)
+
+	content, err := os.ReadFile(LockPath(dir))
+	if err != nil {
+		t.Fatalf("read lockfile: %v", err)
+	}
+	if got, want := string(content), strconv.Itoa(os.Getpid()); got != want {
+		t.Errorf("lockfile content = %q, want current pid %q", got, want)
+	}
+}
+
+func TestLockState(t *testing.T) {
+	alive := func(int) bool { return true }
+	dead := func(int) bool { return false }
+
+	tests := []struct {
+		name    string
+		content string
+		isAlive func(int) bool
+		want    lockDecision
+	}{
+		{"valid pid, alive", "12345", alive, lockAlive},
+		{"valid pid, dead", "12345", dead, lockStale},
+		{"corrupted content", "not-a-pid", alive, lockStale},
+		{"empty content", "", alive, lockStale},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := lockState([]byte(tt.content), tt.isAlive)
+			if got != tt.want {
+				t.Errorf("lockState(%q) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAcquireLockStaleRetry(t *testing.T) {
+	dir := t.TempDir()
+
+	// A short-lived process, already exited by the time we use its pid:
+	// a real pid that's guaranteed dead, without guessing an unused number.
+	deadCmd := exec.Command("true")
+	if err := deadCmd.Run(); err != nil {
+		t.Fatalf("spawn short-lived process: %v", err)
+	}
+	deadPID := deadCmd.Process.Pid
+
+	if err := os.WriteFile(LockPath(dir), []byte(strconv.Itoa(deadPID)), 0o644); err != nil {
+		t.Fatalf("seed stale lock: %v", err)
+	}
+
+	f, err := AcquireLock(dir)
+	if err != nil {
+		t.Fatalf("AcquireLock() with stale lock error: %v", err)
+	}
+	defer ReleaseLock(f, dir)
+
+	content, err := os.ReadFile(LockPath(dir))
+	if err != nil {
+		t.Fatalf("read lockfile: %v", err)
+	}
+	if got, want := string(content), strconv.Itoa(os.Getpid()); got != want {
+		t.Errorf("lockfile content after stale retry = %q, want current pid %q", got, want)
+	}
+}
+
+func TestAcquireLockCorruptContentRetry(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(LockPath(dir), []byte("garbage"), 0o644); err != nil {
+		t.Fatalf("seed corrupt lock: %v", err)
+	}
+
+	f, err := AcquireLock(dir)
+	if err != nil {
+		t.Fatalf("AcquireLock() with corrupt lock error: %v", err)
+	}
+	_ = ReleaseLock(f, dir)
+}
+
+func TestDescribeTapExit(t *testing.T) {
+	exitErrWithCode := func(t *testing.T, code int) error {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code))
+		return cmd.Run()
+	}
+
+	t.Run("exit code 2 is a TCC permission error", func(t *testing.T) {
+		err := DescribeTapExit(exitErrWithCode(t, 2), "some stderr output")
+		if err == nil {
+			t.Fatalf("DescribeTapExit() = nil, want error")
+		}
+		if !strings.Contains(err.Error(), "permission") {
+			t.Errorf("DescribeTapExit() = %q, want mention of permission", err.Error())
+		}
+		if !strings.Contains(err.Error(), "some stderr output") {
+			t.Errorf("DescribeTapExit() = %q, want it to include stderr", err.Error())
+		}
+	})
+
+	t.Run("other exit codes are generic failures", func(t *testing.T) {
+		err := DescribeTapExit(exitErrWithCode(t, 1), "boom")
+		if err == nil {
+			t.Fatalf("DescribeTapExit() = nil, want error")
+		}
+		if strings.Contains(err.Error(), "permission") {
+			t.Errorf("DescribeTapExit() = %q, want no permission mention for exit code 1", err.Error())
+		}
+		if !strings.Contains(err.Error(), "boom") {
+			t.Errorf("DescribeTapExit() = %q, want it to include stderr", err.Error())
+		}
+	})
 }

@@ -7,6 +7,7 @@ build-go:
 
 build-tap:
 	/usr/bin/swiftc -O -framework CoreAudio -framework AVFoundation -framework AudioToolbox \
+		-framework AppKit -framework CoreGraphics \
 		-o bin/nastro-tap tap/main.swift
 
 clean:

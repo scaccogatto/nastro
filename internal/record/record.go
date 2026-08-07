@@ -75,11 +75,82 @@ func LockPath(outputDir string) string {
 	return filepath.Join(outputDir, lockFileName)
 }
 
-// AcquireLock atomically creates the lockfile in outputDir, failing with
-// ErrAlreadyLocked if one already exists. No staleness detection.
+// lockDecision is the pure verdict on an existing lockfile's content.
+type lockDecision int
+
+const (
+	// lockAlive means the lock's owner is still running: a real conflict.
+	lockAlive lockDecision = iota
+	// lockStale means the lock's owner is gone (or the content is
+	// unreadable/corrupt): safe to remove and retry.
+	lockStale
+)
+
+// lockState decides whether an existing lockfile's content is alive or
+// stale, given an isAlive probe for a pid. Corrupt or empty content is
+// always stale: it can't belong to a running process we can identify.
+func lockState(content []byte, isAlive func(int) bool) lockDecision {
+	pid, err := strconv.Atoi(strings.TrimSpace(string(content)))
+	if err != nil {
+		return lockStale
+	}
+	if isAlive(pid) {
+		return lockAlive
+	}
+	return lockStale
+}
+
+// isProcessAlive reports whether pid names a running process, via a
+// zero-signal kill probe. Treats "exists but not ours" (EPERM) as alive:
+// only a definite ESRCH means it's actually gone.
+func isProcessAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || !errors.Is(err, syscall.ESRCH)
+}
+
+// tryAcquire atomically creates the lockfile in outputDir with the current
+// pid as its content, failing with fs.ErrExist if one already exists.
+func tryAcquire(outputDir string) (*os.File, error) {
+	f, err := os.OpenFile(LockPath(outputDir), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := fmt.Fprintf(f, "%d", os.Getpid()); err != nil {
+		f.Close()
+		os.Remove(LockPath(outputDir))
+		return nil, err
+	}
+	return f, nil
+}
+
+// AcquireLock atomically creates the lockfile in outputDir with the current
+// pid as its content. If one already exists, it checks whether the owning
+// pid is still alive: a stale lock (dead pid, or unreadable/corrupt
+// content) is removed and acquisition is retried once. A live lock fails
+// with ErrAlreadyLocked.
 func AcquireLock(outputDir string) (*os.File, error) {
+	f, err := tryAcquire(outputDir)
+	if err == nil {
+		return f, nil
+	}
+	if !errors.Is(err, fs.ErrExist) {
+		return nil, err
+	}
+
 	path := LockPath(outputDir)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	content, readErr := os.ReadFile(path)
+	switch {
+	case readErr == nil && lockState(content, isProcessAlive) == lockStale:
+		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			return nil, rmErr
+		}
+	case readErr != nil && errors.Is(readErr, fs.ErrNotExist):
+		// Released concurrently between our EEXIST and this read: just retry.
+	default:
+		return nil, fmt.Errorf("%w (lockfile at %s)", ErrAlreadyLocked, path)
+	}
+
+	f, err = tryAcquire(outputDir)
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return nil, fmt.Errorf("%w (lockfile at %s)", ErrAlreadyLocked, path)
@@ -98,7 +169,8 @@ func ReleaseLock(f *os.File, outputDir string) error {
 }
 
 // --- everything below is side-effecting orchestration: subprocess exec,
-// signals, timers, disk stats. Deliberately outside TDD scope. ---
+// signals, timers, disk stats. Deliberately outside TDD scope, except for
+// pure helpers pulled out along the way (DescribeTapExit), which are. ---
 
 // Options holds the flags for `nastro record`.
 type Options struct {
@@ -107,43 +179,52 @@ type Options struct {
 	SystemOnly bool
 }
 
-// Run executes a full headless recording session: lock, spawn nastro-tap,
-// print a live timer, and finalize on SIGINT.
-func Run(cfg config.Config, opts Options) error {
+// Session is a running nastro-tap subprocess plus everything needed to
+// observe, stop, and finalize it. Shared by the headless `nastro record`
+// CLI and the TUI recording screen so neither duplicates the
+// lock/dir/spawn/caffeinate orchestration.
+type Session struct {
+	Cmd       *exec.Cmd
+	RecordDir string
+	AudioPath string
+	OutputDir string
+	Stderr    *bytes.Buffer
+	Start     time.Time
+
+	lockFile *os.File
+	waitErr  chan error
+	released bool
+}
+
+// Start validates opts, prepares the record dir, acquires the lock, and
+// spawns nastro-tap plus caffeinate. The caller must eventually call
+// Release (directly, or via Discard) to release the lock.
+func Start(cfg config.Config, opts Options) (*Session, error) {
 	if opts.MicOnly && opts.SystemOnly {
-		return fmt.Errorf("--mic-only and --system-only are mutually exclusive")
+		return nil, fmt.Errorf("--mic-only and --system-only are mutually exclusive")
 	}
 
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
-		return fmt.Errorf("create output dir: %w", err)
+		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 	warnLowDiskSpace(cfg.OutputDir, os.Stderr)
 
 	lockFile, err := AcquireLock(cfg.OutputDir)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	released := false
-	release := func() {
-		if released {
-			return
-		}
-		released = true
-		if err := ReleaseLock(lockFile, cfg.OutputDir); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to release lockfile: %v\n", err)
-		}
-	}
-	defer release()
 
 	dirName := BuildDirName(time.Now(), Slugify(opts.Name))
 	recordDir := filepath.Join(cfg.OutputDir, dirName)
 	if err := os.MkdirAll(recordDir, 0o755); err != nil {
-		return fmt.Errorf("create record dir: %w", err)
+		_ = ReleaseLock(lockFile, cfg.OutputDir)
+		return nil, fmt.Errorf("create record dir: %w", err)
 	}
 
 	tapPath, err := resolveTapPath()
 	if err != nil {
-		return err
+		_ = ReleaseLock(lockFile, cfg.OutputDir)
+		return nil, err
 	}
 
 	audioPath := filepath.Join(recordDir, "audio.m4a")
@@ -159,60 +240,113 @@ func Run(cfg config.Config, opts Options) error {
 	cmd := exec.Command(tapPath, args...)
 	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start nastro-tap: %w", err)
+		_ = ReleaseLock(lockFile, cfg.OutputDir)
+		return nil, fmt.Errorf("start nastro-tap: %w", err)
 	}
 	spawnCaffeinate(cmd.Process.Pid)
+
+	waitErr := make(chan error, 1)
+	go func() { waitErr <- cmd.Wait() }()
+
+	return &Session{
+		Cmd:       cmd,
+		RecordDir: recordDir,
+		AudioPath: audioPath,
+		OutputDir: cfg.OutputDir,
+		Stderr:    &stderrBuf,
+		Start:     time.Now(),
+		lockFile:  lockFile,
+		waitErr:   waitErr,
+	}, nil
+}
+
+// Wait returns the channel nastro-tap's exit is delivered on, exactly once.
+func (s *Session) Wait() <-chan error { return s.waitErr }
+
+// Signal forwards an OS signal to nastro-tap.
+func (s *Session) Signal(sig os.Signal) error {
+	return s.Cmd.Process.Signal(sig)
+}
+
+// Kill force-stops nastro-tap.
+func (s *Session) Kill() error {
+	return s.Cmd.Process.Kill()
+}
+
+// Release releases the session's lock. Safe to call more than once.
+func (s *Session) Release() {
+	if s.released {
+		return
+	}
+	s.released = true
+	if err := ReleaseLock(s.lockFile, s.OutputDir); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to release lockfile: %v\n", err)
+	}
+}
+
+// Discard removes RecordDir unconditionally (an explicit "quit without
+// saving", or a too-short recording that isn't worth keeping).
+func (s *Session) Discard() error {
+	return os.RemoveAll(s.RecordDir)
+}
+
+// Run executes a full headless recording session: lock, spawn nastro-tap,
+// print a live timer, and finalize on SIGINT.
+func Run(cfg config.Config, opts Options) error {
+	sess, err := Start(cfg, opts)
+	if err != nil {
+		return err
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
 
-	waitErr := make(chan error, 1)
-	go func() { waitErr <- cmd.Wait() }()
-
-	start := time.Now()
 	stopTimer := make(chan struct{})
-	go printTimer(start, stopTimer)
+	go printTimer(sess.Start, stopTimer)
 
 	select {
 	case <-sigCh:
 		close(stopTimer)
-		return finishOnInterrupt(cmd, waitErr, start, recordDir, release)
+		return finishOnInterrupt(sess)
 
-	case err := <-waitErr:
+	case err := <-sess.Wait():
 		close(stopTimer)
-		release()
-		return handleTapExit(err, stderrBuf.String())
+		sess.Release()
+		return DescribeTapExit(err, sess.Stderr.String())
 	}
 }
 
-func finishOnInterrupt(cmd *exec.Cmd, waitErr chan error, start time.Time, recordDir string, release func()) error {
-	_ = cmd.Process.Signal(os.Interrupt)
+func finishOnInterrupt(sess *Session) error {
+	_ = sess.Signal(os.Interrupt)
 
 	select {
-	case <-waitErr:
+	case <-sess.Wait():
 	case <-time.After(5 * time.Second):
-		_ = cmd.Process.Kill()
-		<-waitErr
+		_ = sess.Kill()
+		<-sess.Wait()
 	}
 
-	release()
-	elapsed := time.Since(start)
+	sess.Release()
+	elapsed := time.Since(sess.Start)
 
 	fmt.Println()
 	if ShouldDiscard(elapsed) {
-		if err := os.RemoveAll(recordDir); err != nil {
+		if err := sess.Discard(); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to remove short recording: %v\n", err)
 		}
 		fmt.Println("recording discarded (shorter than 2s)")
 		return nil
 	}
 
-	fmt.Println(recordDir)
+	fmt.Println(sess.RecordDir)
 	return nil
 }
 
-func handleTapExit(err error, stderr string) error {
+// DescribeTapExit turns a nastro-tap subprocess exit (err from cmd.Wait, its
+// stderr output) into a user-facing error, special-casing exit code 2 (the
+// TCC audio-capture permission failure) with a guided message.
+func DescribeTapExit(err error, stderr string) error {
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 2 {
 		return fmt.Errorf(

@@ -22,7 +22,7 @@ func main() {
 
 	args := os.Args[1:]
 	if len(args) == 0 {
-		runOrExit(func() error { return tui.Run(scanOrExit(cfg)) })
+		runOrExit(func() error { return tui.Run(cfg, scanOrExit(cfg)) })
 		return
 	}
 
@@ -66,7 +66,7 @@ func runRecords(cfg config.Config, args []string) error {
 		return nil
 	}
 
-	return tui.Run(recs)
+	return tui.Run(cfg, recs)
 }
 
 func runTranscribe(cfg config.Config, args []string) error {

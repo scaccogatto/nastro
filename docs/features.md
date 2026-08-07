@@ -36,7 +36,7 @@ Contesto d'uso: call Google Meet in italiano con clienti, da Ghostty/herdr, tutt
 ## Won't (deliberato)
 
 - Summarization AI / integrazioni cloud: la conversione è "in autonomia" per scelta
-- GUI, menu bar app: esiste già QuickRecorder per quello
+- GUI, menu bar app: esiste già QuickRecorder per quello. Eccezione implementata: indicatore ● in menu bar mentre la cattura è attiva (NSStatusItem nel tap, best-effort, nessuna app)
 - Auto-start su rilevamento meeting: YAGNI, e odore di sorveglianza
 - Notarizzazione/distribuzione firmata: uso personale, `brew tap` personale basta
 

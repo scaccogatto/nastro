@@ -20,6 +20,8 @@ import Dispatch
 import CoreAudio
 import AudioToolbox
 import AVFoundation
+import AppKit
+import CoreGraphics
 
 // MARK: - Errors
 
@@ -597,6 +599,37 @@ private func logWarning(_ message: String) {
     FileHandle.standardError.write("Warning: \(message)\n".data(using: .utf8)!)
 }
 
+// MARK: - Menu bar indicator
+
+/// Cosmetic only: capture is the primary job, this is best-effort on top of
+/// it. `CGSessionCopyCurrentDictionary` returns nil (no "on console" key)
+/// when the process has no attached graphical session -- e.g. run over SSH
+/// or from a launchd daemon context -- which is exactly when creating a
+/// status item would be pointless (nothing to draw it on).
+private func hasGraphicalSession() -> Bool {
+    guard let info = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+    return (info["kCGSSessionOnConsoleKey"] as? Bool) ?? false
+}
+
+private var recordingStatusItem: NSStatusItem?
+
+private func showRecordingIndicator() {
+    guard hasGraphicalSession() else { return }
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    if let button = item.button {
+        button.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "nastro recording")
+        button.contentTintColor = .systemRed
+        button.toolTip = "nastro - recording"
+    }
+    recordingStatusItem = item
+}
+
+private func hideRecordingIndicator() {
+    guard let item = recordingStatusItem else { return }
+    NSStatusBar.system.removeStatusItem(item)
+    recordingStatusItem = nil
+}
+
 // MARK: - Entry point
 
 private func fail(_ message: String, code: Int32 = 1) -> Never {
@@ -635,6 +668,12 @@ do {
     fail("Failed to start audio capture: \(error.localizedDescription)")
 }
 
+// No dock icon/app switcher entry -- this is a background capture helper,
+// not an app -- but the menu bar status item (best-effort, see
+// showRecordingIndicator) still needs a policy set for it to be drawable.
+NSApplication.shared.setActivationPolicy(.accessory)
+showRecordingIndicator()
+
 func writeMetadata() {
     let duration = recorder.elapsedSeconds
     let metadataURL = outputURL.deletingLastPathComponent().appendingPathComponent("metadata.json")
@@ -646,7 +685,15 @@ func writeMetadata() {
     }
 }
 
+// Periodic metadata.json write, on top of the precise final write in
+// shutdown(): caps how much duration a crash/kill -9 can lose to 5s.
+let statusTimer = DispatchSource.makeTimerSource(queue: .main)
+statusTimer.schedule(deadline: .now() + 5, repeating: 5)
+statusTimer.setEventHandler { writeMetadata() }
+statusTimer.resume()
+
 func shutdown() -> Never {
+    hideRecordingIndicator()
     recorder.stop()
     writeMetadata()
     exit(0)
@@ -667,4 +714,9 @@ let sigtermSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .mai
 sigtermSource.setEventHandler { shutdown() }
 sigtermSource.resume()
 
-RunLoop.main.run()
+// NSApplication.shared.run() (not a bare RunLoop.main.run()) is what
+// actually drives the status item onto the menu bar -- AppKit needs its own
+// event loop pumping, a plain CFRunLoop isn't enough to get it drawn. The
+// DispatchSource signal handlers above stay on the main queue/run loop
+// either way, so they keep firing under NSApp's loop too.
+NSApplication.shared.run()
