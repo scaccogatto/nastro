@@ -29,11 +29,14 @@ idle ──record──▶ recording ──stop/Ctrl+C──▶ saved ──tran
 │  2026-08-06-1430-cliente-eppi       │
 │  ~/Recordings/nastro/…  128 MB      │
 │                                     │
-│  [s]top  [p]ausa  [q]uit senza salv.│
+│  s stop & save · x discard ·        │
+│  ctrl+c stop & save                 │
 └─────────────────────────────────────┘
 ```
 
-Opzioni di `record` (flag CLI o form huh in TUI): `--name <slug>` (default: timestamp), `--mic-only` / `--system-only`, `--split` (tracce separate), `--video` (fase 2).
+`[p]ausa` non è implementata (backlog, non nella TUI reale).
+
+Opzioni di `record`: `--name <slug>` (default: timestamp, unico campo esposto anche dal form della TUI), `--mic-only` / `--system-only` (solo CLI per ora, nessun equivalente TUI). `--split` (tracce separate) e `--video` (fase 2) sono aspirazionali: non ancora implementate né in CLI né in TUI.
 
 ## Schermata: records
 
@@ -43,20 +46,25 @@ Opzioni di `record` (flag CLI o form huh in TUI): `--name <slug>` (default: time
 │   2026-08-05-1000  standup        12m   38MB  - │
 │   2026-08-04-1500  presales-baxi  55m  170MB  ✓ │
 │                                                 │
-│ invio dettaglio · t transcribe · o Finder ·     │
-│ d elimina · / filtra · q esci                   │
+│ r rec · enter dettaglio · t transcribe ·        │
+│ o finder · d elimina · / filtra · q/ctrl+c esci │
 └─────────────────────────────────────────────────┘
 ```
+
+Mentre il filtro (`/`) è attivo, ogni tasto (incluso `q`) va all'input del
+filtro: `enter` applica, `esc` annulla. Le scorciatoie tornano attive solo a
+filtro applicato o chiuso.
 
 `--plain`: una riga per record, tab-separated → componibile con fzf/zoxide/script.
 
 ## Flusso: transcribe
 
 1. `nastro transcribe last` (o `t` dalla lista)
-2. Modello assente → download ggml con progress (una tantum)
-3. whisper-cli in subprocess, progress in TUI (o stdout se headless)
-4. Output: `transcript.txt` + `transcript.srt` nella dir del record
-5. Notifica macOS a fine job (should)
+2. Modello assente → download ggml con progress e size stimata (una tantum), annullabile
+3. Conversione audio (afconvert): spinner "preparing audio…", annullabile
+4. whisper-cli in subprocess: spinner "transcribing…", progress in TUI (o stdout se headless), annullabile
+5. Output: `transcript.txt` + `transcript.srt` nella dir del record
+6. Notifica macOS a fine job (should)
 
 Default da config: `model = "large-v3-turbo"`, `lang = "it"`.
 
@@ -69,11 +77,12 @@ Default da config: `model = "large-v3-turbo"`, `lang = "it"`.
 
 | Caso | Comportamento |
 |---|---|
-| Ctrl+C durante record | Stop pulito = salva. `q` esplicito per scartare |
+| Ctrl+C / q / s durante record | Stop pulito = salva. `x` esplicito per scartare (con conferma y/n) |
 | Sleep del Mac | `caffeinate` per la durata della registrazione |
 | Due `record` contemporanei | Rifiutato con errore chiaro (lockfile) |
 | Disco < 1GB | Warning prima di partire |
-| Transcribe di un record già trascritto | Chiede conferma overwrite |
+| Transcribe di un record già trascritto | Chiede conferma overwrite, nominando il record |
+| Ctrl+C / esc durante transcribe | Annulla il job (whisper-cli/afconvert), pulisce l'output parziale, torna alla schermata di provenienza |
 | Record vuoto (0 byte / <2s) | Non salvato, dir rimossa |
 
 ## Integrazione herdr (documentazione, non feature)

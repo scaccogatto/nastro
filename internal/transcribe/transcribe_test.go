@@ -182,3 +182,78 @@ func TestStartModelDownloadCancelCleansUpPartFile(t *testing.T) {
 		t.Errorf(".part file still exists after cancel")
 	}
 }
+
+// fakeWhisperScript stands in for whisper-cli: it writes partial .txt/.srt
+// output (whisper-cli writes incrementally too) at the prefix passed via
+// -of, then sleeps, so tests can cancel mid-run and assert the partial
+// output gets cleaned up.
+// It execs its final sleep (rather than forking it) so killing the script's
+// single process is instantaneous: a forked-but-not-exec'd child would
+// inherit the stdout/stderr pipe fd and keep it open past the kill, making
+// cmd.Wait() block until the child exits on its own.
+const fakeWhisperScript = `#!/bin/sh
+prefix=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-of" ]; then
+    prefix="$2"
+  fi
+  shift
+done
+echo partial > "${prefix}.txt"
+echo partial > "${prefix}.srt"
+exec sleep 5
+`
+
+func TestStartWhisperCancelCleansUpPartialOutput(t *testing.T) {
+	scriptDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(scriptDir, "whisper-cli"), []byte(fakeWhisperScript), 0o755); err != nil {
+		t.Fatalf("write fake whisper-cli: %v", err)
+	}
+	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
+
+	outPrefix := filepath.Join(t.TempDir(), "transcript")
+	ctx, cancel := context.WithCancel(context.Background())
+	job, err := StartWhisper(ctx, "model.bin", "en", outPrefix, "audio.wav")
+	if err != nil {
+		t.Fatalf("StartWhisper: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, statErr := os.Stat(outPrefix + ".txt"); statErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fake whisper-cli never wrote partial output")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	if err := <-job.Wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait() = %v, want context.Canceled", err)
+	}
+	if _, statErr := os.Stat(outPrefix + ".txt"); !os.IsNotExist(statErr) {
+		t.Errorf("partial .txt still exists after cancel")
+	}
+	if _, statErr := os.Stat(outPrefix + ".srt"); !os.IsNotExist(statErr) {
+		t.Errorf("partial .srt still exists after cancel")
+	}
+}
+
+func TestConvertToWavCancelReturnsContextCanceled(t *testing.T) {
+	scriptDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(scriptDir, "afconvert"), []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatalf("write fake afconvert: %v", err)
+	}
+	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- ConvertToWav(ctx, "in.m4a", "out.wav") }()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("ConvertToWav() = %v, want context.Canceled", err)
+	}
+}

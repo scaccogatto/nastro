@@ -5,9 +5,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/scaccogatto/nastro/internal/config"
@@ -89,16 +91,35 @@ func TestNameFormEnterStartsRecording(t *testing.T) {
 	}
 }
 
-func TestUpdateQKeyInRecordingAsksConfirmation(t *testing.T) {
+func TestUpdateXKeyInRecordingAsksConfirmation(t *testing.T) {
+	m := Model{mode: modeRecording}
+
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "x", Code: 'x'})
+	nm := newModel.(Model)
+	if !nm.confirmingQuit {
+		t.Errorf("Update(x) in recording mode: confirmingQuit = false, want true")
+	}
+	if cmd != nil {
+		t.Errorf("Update(x) in recording mode cmd = %v, want nil (just asks confirmation)", cmd)
+	}
+}
+
+func TestUpdateQKeyInRecordingStopsAndSaves(t *testing.T) {
 	m := Model{mode: modeRecording}
 
 	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "q", Code: 'q'})
-	nm := newModel.(Model)
-	if !nm.confirmingQuit {
-		t.Errorf("Update(q) in recording mode: confirmingQuit = false, want true")
+	if cmd == nil {
+		t.Fatalf("Update(q) in recording mode returned nil cmd, want a stop cmd")
 	}
-	if cmd != nil {
-		t.Errorf("Update(q) in recording mode cmd = %v, want nil (just asks confirmation)", cmd)
+	if msg := cmd(); func() bool { _, ok := msg.(tea.QuitMsg); return ok }() {
+		t.Errorf("Update(q) in recording mode returned tea.Quit, want it to stop-and-save instead")
+	}
+	nm := newModel.(Model)
+	if !nm.stopRequested {
+		t.Errorf("Update(q) in recording mode: stopRequested = false, want true")
+	}
+	if nm.confirmingQuit {
+		t.Errorf("Update(q) in recording mode: confirmingQuit = true, want false (q no longer discards)")
 	}
 }
 
@@ -138,6 +159,18 @@ func TestUpdateYKeyConfirmsQuit(t *testing.T) {
 	}
 	if !newModel.(Model).killRequested {
 		t.Errorf("Update(y) confirming quit: killRequested = false, want true")
+	}
+}
+
+func TestUpdateCapitalYKeyConfirmsQuit(t *testing.T) {
+	m := Model{mode: modeRecording, confirmingQuit: true}
+
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "Y", Code: 'Y'})
+	if cmd == nil {
+		t.Fatalf("Update(Y) confirming quit returned nil cmd, want a kill cmd")
+	}
+	if !newModel.(Model).killRequested {
+		t.Errorf("Update(Y) confirming quit: killRequested = false, want true")
 	}
 }
 
@@ -214,9 +247,48 @@ func TestFooterForKnownModesNonEmpty(t *testing.T) {
 		modeTranscribeDownloadConfirm, modeTranscribeError,
 	}
 	for _, mode := range modes {
-		if footerFor(mode) == "" {
-			t.Errorf("footerFor(%v) = \"\", want non-empty", mode)
+		for _, compact := range []bool{false, true} {
+			if footerFor(mode, compact) == "" {
+				t.Errorf("footerFor(%v, %v) = \"\", want non-empty", mode, compact)
+			}
 		}
+	}
+}
+
+func TestFilteringForwardsAllKeysToList(t *testing.T) {
+	m := New(config.Config{}, []records.Record{{ID: "2026-08-06-1430-standup"}})
+	m.list.SetFilterState(list.Filtering)
+
+	for _, key := range []string{"r", "q"} {
+		newModel, cmd := m.Update(tea.KeyPressMsg{Text: key, Code: rune(key[0])})
+		nm := newModel.(Model)
+		if nm.mode != modeList {
+			t.Errorf("Update(%q) while filtering: mode = %v, want modeList", key, nm.mode)
+		}
+		if cmd != nil {
+			if _, ok := cmd().(tea.QuitMsg); ok {
+				t.Errorf("Update(%q) while filtering returned tea.Quit, want the filter to consume it", key)
+			}
+		}
+	}
+}
+
+func TestFooterWhileFilteringShowsApplyCancel(t *testing.T) {
+	m := New(config.Config{}, nil)
+	m.list.SetFilterState(list.Filtering)
+	if got := m.footer(); got != "enter apply · esc cancel" {
+		t.Errorf("footer() while filtering = %q, want %q", got, "enter apply · esc cancel")
+	}
+}
+
+func TestEmptyListShowsInviteNotNoItems(t *testing.T) {
+	m := New(config.Config{}, nil)
+	v := m.View().Content
+	if !strings.Contains(v, "no recordings yet") {
+		t.Errorf("View() on empty list missing invite, got:\n%s", v)
+	}
+	if strings.Contains(v, "No items") {
+		t.Errorf("View() on empty list still contains bubbles' default \"No items\", got:\n%s", v)
 	}
 }
 
@@ -461,7 +533,10 @@ func TestHandleTranscribeStartedError(t *testing.T) {
 }
 
 func TestHandleTranscribeStartedOKEntersTranscribing(t *testing.T) {
-	m := Model{}
+	// mode is already modeTranscribing by the time transcribeStartedMsg
+	// arrives: startTranscribingScreen sets it eagerly (before ConvertToWav
+	// even runs) so the spinner shows "preparing audio…" with no dead gap.
+	m := Model{mode: modeTranscribing, transcribePhase: transcribePreparing}
 
 	newModel, cmd := m.Update(transcribeStartedMsg{tmpWavPath: "/tmp/x.wav"})
 	nm := newModel.(Model)
@@ -472,7 +547,99 @@ func TestHandleTranscribeStartedOKEntersTranscribing(t *testing.T) {
 		t.Errorf("transcribeTmpWav = %q, want %q", nm.transcribeTmpWav, "/tmp/x.wav")
 	}
 	if cmd == nil {
-		t.Errorf("cmd = nil, want a batch of spinner tick + await")
+		t.Errorf("cmd = nil, want awaitTranscribeCmd")
+	}
+}
+
+func TestStartTranscribingScreenEntersPreparingPhase(t *testing.T) {
+	m := Model{cfg: config.Config{OutputDir: t.TempDir()}}
+
+	nm, cmd := m.startTranscribingScreen(records.Record{ID: "2026-08-06-1430-standup"})
+	if nm.mode != modeTranscribing {
+		t.Errorf("mode = %v, want modeTranscribing", nm.mode)
+	}
+	if nm.transcribePhase != transcribePreparing {
+		t.Errorf("transcribePhase = %v, want transcribePreparing", nm.transcribePhase)
+	}
+	if nm.transcribeCancel == nil {
+		t.Errorf("transcribeCancel = nil, want a cancel func")
+	}
+	if cmd == nil {
+		t.Errorf("cmd = nil, want a batch of spinner tick + startTranscribeRunCmd")
+	}
+	nm.transcribeCancel() // avoid leaking the context past the test
+}
+
+func TestUpdateKeyTranscribingEscCancels(t *testing.T) {
+	canceled := false
+	m := Model{mode: modeTranscribing, transcribeCancel: func() { canceled = true }}
+
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "esc"})
+	if cmd != nil {
+		t.Errorf("Update(esc) in transcribing cmd = %v, want nil", cmd)
+	}
+	if !canceled {
+		t.Errorf("Update(esc) in transcribing: transcribeCancel not called")
+	}
+}
+
+func TestUpdateKeyTranscribingCtrlCCancelsInsteadOfQuitting(t *testing.T) {
+	canceled := false
+	m := Model{mode: modeTranscribing, transcribeCancel: func() { canceled = true }}
+
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c"})
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Errorf("Update(ctrl+c) in transcribing returned tea.Quit, want it to cancel instead")
+		}
+	}
+	if !canceled {
+		t.Errorf("Update(ctrl+c) in transcribing: transcribeCancel not called")
+	}
+	if newModel.(Model).mode != modeTranscribing {
+		t.Errorf("Update(ctrl+c) in transcribing: mode = %v, want modeTranscribing (unchanged until the job reports back)", newModel.(Model).mode)
+	}
+}
+
+func TestHandleTranscribeDoneCanceledShowsStatusOnReturnScreen(t *testing.T) {
+	m := Model{
+		mode:             modeTranscribing,
+		transcribeReturn: modeList,
+		transcribeCancel: func() {},
+	}
+
+	newModel, cmd := m.Update(transcribeDoneMsg{err: context.Canceled})
+	nm := newModel.(Model)
+	if nm.mode != modeList {
+		t.Errorf("mode = %v, want modeList (transcribeReturn)", nm.mode)
+	}
+	if nm.statusMsg != "transcription canceled" {
+		t.Errorf("statusMsg = %q, want %q", nm.statusMsg, "transcription canceled")
+	}
+	if nm.statusIsErr {
+		t.Errorf("statusIsErr = true, want false for a user cancel")
+	}
+	if nm.transcribeCancel != nil {
+		t.Errorf("transcribeCancel not cleared after done")
+	}
+	if cmd != nil {
+		t.Errorf("cmd = %v, want nil", cmd)
+	}
+}
+
+func TestHandleTranscribeStartedCanceledDuringPreparing(t *testing.T) {
+	m := Model{mode: modeTranscribing, transcribeReturn: modeDetail, transcribeCancel: func() {}}
+
+	newModel, cmd := m.Update(transcribeStartedMsg{err: context.Canceled})
+	nm := newModel.(Model)
+	if nm.mode != modeDetail {
+		t.Errorf("mode = %v, want modeDetail (transcribeReturn)", nm.mode)
+	}
+	if nm.statusMsg != "transcription canceled" {
+		t.Errorf("statusMsg = %q, want %q", nm.statusMsg, "transcription canceled")
+	}
+	if cmd != nil {
+		t.Errorf("cmd = %v, want nil", cmd)
 	}
 }
 

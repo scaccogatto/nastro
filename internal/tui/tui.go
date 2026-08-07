@@ -20,7 +20,6 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 
 	"github.com/scaccogatto/nastro/internal/config"
 	"github.com/scaccogatto/nastro/internal/record"
@@ -28,40 +27,23 @@ import (
 	"github.com/scaccogatto/nastro/internal/transcribe"
 )
 
-var appStyle = lipgloss.NewStyle().Margin(1, 2)
-var recDotStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-var errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-var accentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
-var footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-
 // chromeLines is the vertical space the list screen always reserves outside
 // the list itself: status strip (2) + help footer (2). Keeping it fixed makes
 // the legend always visible and the layout stable when status text appears.
+// The footer stays a single (possibly clamped) line at any width rather than
+// wrapping to two, so this doesn't need to vary with terminal size.
 const chromeLines = 4
 
-// item adapts a records.Record to list.DefaultItem.
+// footerCompactThreshold is the terminal width below which the footer
+// switches to its abbreviated variant.
+const footerCompactThreshold = 85
+
+// item adapts a records.Record to list.Item. Only FilterValue is required by
+// the base Item interface: everything else (name, date, duration...) is
+// rendered directly from the wrapped Record by recordDelegate, so there's no
+// need to also satisfy list.DefaultItem.
 type item struct {
 	r records.Record
-}
-
-func (i item) Title() string {
-	if i.r.Slug != "" {
-		return i.r.Slug
-	}
-	return i.r.ID
-}
-
-func (i item) Description() string {
-	duration := "-"
-	if i.r.HasDuration {
-		duration = records.FormatDuration(i.r.DurationSeconds)
-	}
-	transcript := "-"
-	if i.r.HasTranscript {
-		transcript = "✓"
-	}
-	return fmt.Sprintf("%s · %s · %s · transcript %s",
-		i.r.Date.Format("2006-01-02 15:04"), duration, records.FormatSize(i.r.SizeBytes), transcript)
 }
 
 func (i item) FilterValue() string { return i.r.ID + " " + i.r.Slug }
@@ -82,12 +64,27 @@ const (
 	modeTranscribeError
 )
 
+// transcribePhase distinguishes the two visible stages of a transcribe run,
+// both shown on modeTranscribing: converting the source audio (afconvert),
+// before whisper-cli has produced any output, and whisper-cli actually
+// running.
+type transcribePhase int
+
+const (
+	transcribePreparing transcribePhase = iota
+	transcribeRunning
+)
+
 // Model is the bubbletea model for the nastro TUI: the records list, and
 // every screen reachable from it.
 type Model struct {
 	list list.Model
 	cfg  config.Config
 	mode screen
+
+	// width/height are the terminal's last known size (from WindowSizeMsg),
+	// used to keep every view and the footer within it.
+	width, height int
 
 	// recording screen state
 	sess           *record.Session
@@ -117,10 +114,12 @@ type Model struct {
 	pendingModelPath  string
 	transcribeErr     error
 	transcribeStart   time.Time
+	transcribePhase   transcribePhase
 	transcribeSpinner spinner.Model
 	transcribeLines   []string
 	transcribeJob     *transcribe.Job
 	transcribeTmpWav  string
+	transcribeCancel  context.CancelFunc
 
 	downloadJob      *transcribe.DownloadJob
 	downloadPct      float64
@@ -137,9 +136,10 @@ func New(cfg config.Config, recs []records.Record) Model {
 		items[i] = item{r: r}
 	}
 
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	l := list.New(items, recordDelegate{}, 0, 0)
 	l.Title = "nastro records"
 	l.SetShowHelp(false)
+	l.Styles = themedListStyles()
 
 	return Model{
 		list:              l,
@@ -154,8 +154,10 @@ func (m Model) Init() tea.Cmd { return nil }
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
 		h, v := appStyle.GetFrameSize()
 		m.list.SetSize(msg.Width-h, msg.Height-v-chromeLines)
+		m.downloadProgress.SetWidth(min(40, max(m.contentWidth()-4, 1)))
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -167,7 +169,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.level = record.Level{}
 		m.recWarning = msg.diskWarning
 		m.mode = modeRecording
-		return m, awaitOrTickCmd(m.sess)
+		return m, tea.Batch(awaitCmd(m.sess), sizeTickCmd(m.sess))
 
 	case recStartErrMsg:
 		m.recErr = msg.err
@@ -176,11 +178,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case recTickMsg:
 		m.recSize = msg.size
-		return m, awaitOrTickCmd(m.sess)
+		if m.mode != modeRecording {
+			return m, nil
+		}
+		return m, sizeTickCmd(m.sess)
 
 	case levelMsg:
 		m.level = msg.lvl
-		return m, awaitOrTickCmd(m.sess)
+		if m.mode != modeRecording {
+			return m, nil
+		}
+		return m, awaitCmd(m.sess)
 
 	case killTimeoutMsg:
 		if m.mode == modeRecording && m.stopRequested && !m.killRequested {
@@ -237,6 +245,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleTranscribeStarted(msg)
 
 	case transcribeLineMsg:
+		m.transcribePhase = transcribeRunning
 		m.transcribeLines = appendCapped(m.transcribeLines, msg.line, 3)
 		return m, awaitTranscribeCmd(m.transcribeJob)
 
@@ -283,7 +292,7 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case modeDownloading:
 		return m.updateKeyDownloading(msg)
 	case modeTranscribing:
-		return m, nil
+		return m.updateKeyTranscribing(msg)
 	case modeTranscribeError:
 		return m.updateKeyReturn(msg)
 	default:
@@ -291,6 +300,10 @@ func (m Model) updateKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
+// updateKeyList handles the records list screen. While the list's own
+// filter input is capturing keystrokes (FilterState == Filtering), every key
+// is forwarded to it unconditionally: none of the single-letter shortcuts
+// below (q included) are allowed to steal input out of the filter box.
 func (m Model) updateKeyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.confirmDelete {
 		rec, _ := m.selectedRecord()
@@ -298,6 +311,11 @@ func (m Model) updateKeyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.confirmOverwrite {
 		return m.handleOverwriteConfirmKey(msg)
+	}
+	if m.list.FilterState() == list.Filtering {
+		var cmd tea.Cmd
+		m.list, cmd = m.list.Update(msg)
+		return m, cmd
 	}
 
 	switch msg.String() {
@@ -380,24 +398,24 @@ func (m Model) updateKeyNameForm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// updateKeyRecording handles the recording screen. q, s, and ctrl+c are all
+// stop-and-save (the safe, non-destructive action); only x asks to discard.
 func (m Model) updateKeyRecording(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.confirmingQuit {
-		switch msg.String() {
-		case "y":
+		if isConfirmYes(msg.String()) {
 			m.confirmingQuit = false
 			m.killRequested = true
 			return m, killCmd(m.sess)
-		default:
-			m.confirmingQuit = false
-			return m, nil
 		}
+		m.confirmingQuit = false
+		return m, nil
 	}
 
 	switch msg.String() {
-	case "s", "ctrl+c":
+	case "s", "q", "ctrl+c":
 		m.stopRequested = true
 		return m, tea.Batch(signalCmd(m.sess, os.Interrupt), killTimeoutCmd())
-	case "q":
+	case "x":
 		m.confirmingQuit = true
 		return m, nil
 	}
@@ -423,7 +441,7 @@ func (m Model) updateKeyReturn(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateKeyDownloadConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	if msg.String() != "y" {
+	if !isConfirmYes(msg.String()) {
 		m.mode = m.transcribeReturn
 		return m, nil
 	}
@@ -441,6 +459,21 @@ func (m Model) updateKeyDownloading(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// updateKeyTranscribing handles the transcribing screen: esc and ctrl+c both
+// cancel the in-flight run (whichever subprocess is currently running --
+// afconvert or whisper-cli) rather than being swallowed or quitting the app.
+// The actual state transition happens once the canceled run reports back
+// (see handleTranscribeStarted/handleTranscribeDone), not here.
+func (m Model) updateKeyTranscribing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		if m.transcribeCancel != nil {
+			m.transcribeCancel()
+		}
+	}
+	return m, nil
+}
+
 // selectedRecord returns the list's currently highlighted record, if any.
 func (m Model) selectedRecord() (records.Record, bool) {
 	it, ok := m.list.SelectedItem().(item)
@@ -452,6 +485,20 @@ func (m Model) selectedRecord() (records.Record, bool) {
 
 func (m Model) recordDir(rec records.Record) string {
 	return filepath.Join(m.cfg.OutputDir, rec.ID)
+}
+
+// contentWidth is the terminal width available to view content, after
+// appStyle's margin. Falls back to a sensible default before the first
+// WindowSizeMsg (or in tests that never send one).
+func (m Model) contentWidth() int {
+	if m.width <= 0 {
+		return 76
+	}
+	h, _ := appStyle.GetFrameSize()
+	if w := m.width - h; w >= 1 {
+		return w
+	}
+	return 1
 }
 
 // startTranscribe kicks off the transcribe flow for rec, remembering
@@ -470,9 +517,35 @@ func (m Model) startTranscribe(rec records.Record, returnTo screen) (Model, tea.
 	return m, checkTranscribePrereqsCmd(m.cfg)
 }
 
+// startTranscribingScreen enters modeTranscribing immediately (spinner
+// showing "preparing audio…") and kicks off the slower conversion +
+// whisper-cli run in the background, so there's no dead gap before any
+// feedback appears -- afconvert alone can take several seconds on a long
+// recording.
+func (m Model) startTranscribingScreen(rec records.Record) (Model, tea.Cmd) {
+	ctx, cancel := context.WithCancel(context.Background())
+	m.mode = modeTranscribing
+	m.transcribePhase = transcribePreparing
+	m.transcribeStart = time.Now()
+	m.transcribeLines = nil
+	m.transcribeJob = nil
+	m.transcribeCancel = cancel
+	return m, tea.Batch(m.transcribeSpinner.Tick, startTranscribeRunCmd(ctx, m.cfg, rec))
+}
+
+// cancelTranscribeCtx tears down the in-flight transcribe run's context.
+// Idempotent: safe to call once the run has already finished on its own.
+func (m Model) cancelTranscribeCtx() Model {
+	if m.transcribeCancel != nil {
+		m.transcribeCancel()
+		m.transcribeCancel = nil
+	}
+	return m
+}
+
 func (m Model) handleDeleteConfirmKey(msg tea.KeyPressMsg, rec records.Record) (Model, tea.Cmd) {
 	m.confirmDelete = false
-	if msg.String() != "y" {
+	if !isConfirmYes(msg.String()) {
 		return m, nil
 	}
 	m.mode = modeList
@@ -481,7 +554,7 @@ func (m Model) handleDeleteConfirmKey(msg tea.KeyPressMsg, rec records.Record) (
 
 func (m Model) handleOverwriteConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	m.confirmOverwrite = false
-	if msg.String() != "y" {
+	if !isConfirmYes(msg.String()) {
 		return m, nil
 	}
 	return m, checkTranscribePrereqsCmd(m.cfg)
@@ -497,7 +570,7 @@ func (m Model) handleTranscribePrereq(msg transcribePrereqMsg) (Model, tea.Cmd) 
 		m.mode = modeTranscribeDownloadConfirm
 		return m, nil
 	default:
-		return m, startTranscribeRunCmd(m.cfg, m.transcribeTarget)
+		return m.startTranscribingScreen(m.transcribeTarget)
 	}
 }
 
@@ -505,7 +578,7 @@ func (m Model) handleDownloadDone(msg downloadDoneMsg) (Model, tea.Cmd) {
 	m.downloadJob = nil
 	switch {
 	case msg.err == nil:
-		return m, startTranscribeRunCmd(m.cfg, m.transcribeTarget)
+		return m.startTranscribingScreen(m.transcribeTarget)
 	case errors.Is(msg.err, context.Canceled):
 		m.mode = m.transcribeReturn
 		m.statusMsg = "download canceled"
@@ -519,26 +592,38 @@ func (m Model) handleDownloadDone(msg downloadDoneMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) handleTranscribeStarted(msg transcribeStartedMsg) (Model, tea.Cmd) {
+	if errors.Is(msg.err, context.Canceled) {
+		m = m.cancelTranscribeCtx()
+		m.mode = m.transcribeReturn
+		m.statusMsg = "transcription canceled"
+		m.statusIsErr = false
+		return m, nil
+	}
 	if msg.err != nil {
+		m = m.cancelTranscribeCtx()
 		m.transcribeErr = msg.err
 		m.mode = modeTranscribeError
 		return m, nil
 	}
 	m.transcribeJob = msg.job
 	m.transcribeTmpWav = msg.tmpWavPath
-	m.transcribeStart = time.Now()
-	m.transcribeLines = nil
-	m.mode = modeTranscribing
-	return m, tea.Batch(m.transcribeSpinner.Tick, awaitTranscribeCmd(m.transcribeJob))
+	return m, awaitTranscribeCmd(m.transcribeJob)
 }
 
 func (m Model) handleTranscribeDone(msg transcribeDoneMsg) (Model, tea.Cmd) {
+	m = m.cancelTranscribeCtx()
 	if m.transcribeTmpWav != "" {
 		os.Remove(m.transcribeTmpWav)
 		m.transcribeTmpWav = ""
 	}
 	m.transcribeJob = nil
 
+	if errors.Is(msg.err, context.Canceled) {
+		m.mode = m.transcribeReturn
+		m.statusMsg = "transcription canceled"
+		m.statusIsErr = false
+		return m, nil
+	}
 	if msg.err != nil {
 		m.transcribeErr = msg.err
 		m.mode = modeTranscribeError
@@ -571,7 +656,7 @@ func (m Model) handleTapExited(msg tapExitedMsg) (tea.Model, tea.Cmd) {
 
 	case m.stopRequested:
 		sess.Release()
-		status := "saved " + hyperlink(sess.RecordDir, sess.RecordDir)
+		status := truncatedPathLine("saved ", sess.RecordDir, m.contentWidth())
 		if record.ShouldDiscard(time.Since(sess.Start)) {
 			_ = sess.Discard()
 			status = "discarded (shorter than 2s)"
@@ -593,31 +678,32 @@ func (m Model) handleTapExited(msg tapExitedMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() tea.View {
+	width := m.contentWidth()
 	var body string
 	switch m.mode {
 	case modeRecording:
 		body = m.recordingView()
 	case modeRecError:
-		body = fmt.Sprintf("error\n\n%v\n\npress any key to return to list", m.recErr)
+		body = bodyStyle(width).Render(fmt.Sprintf("error\n\n%v", m.recErr))
 	case modeNameForm:
 		body = m.nameFormView()
 	case modeDetail:
 		body = m.detailView()
 	case modeTranscribeMissingWhisper:
-		body = "whisper-cli not found.\n\nInstall it with: brew install whisper-cpp"
+		body = bodyStyle(width).Render("whisper-cli not found.\n\nInstall it with: brew install whisper-cpp")
 	case modeTranscribeDownloadConfirm:
-		body = fmt.Sprintf("model %q missing.\nDownload it now from huggingface.co? [y/n]", m.cfg.WhisperModel)
+		body = bodyStyle(width).Render(formatDownloadPrompt(m.cfg.WhisperModel))
 	case modeDownloading:
 		body = m.downloadingView()
 	case modeTranscribing:
 		body = m.transcribingView()
 	case modeTranscribeError:
-		body = fmt.Sprintf("transcription error\n\n%v", m.transcribeErr)
+		body = bodyStyle(width).Render(fmt.Sprintf("transcription error\n\n%v", m.transcribeErr))
 	default:
 		body = m.listView()
 	}
 
-	if footer := footerFor(m.mode); footer != "" {
+	if footer := m.footer(); footer != "" {
 		body += "\n\n" + footerStyle.Render(footer)
 	}
 
@@ -628,27 +714,46 @@ func (m Model) View() tea.View {
 
 func (m Model) listView() string {
 	body := m.list.View()
+	if len(m.list.Items()) == 0 {
+		body = m.emptyStateBody()
+	}
 
 	// Status strip: always exactly one line (possibly empty) + one blank,
 	// so the layout never jumps and the space reserved by chromeLines is
 	// used deterministically. Confirms take precedence over status text.
 	strip := ""
+	width := m.contentWidth()
 	switch {
 	case m.confirmDelete:
-		strip = "delete selected recording? [y/n]"
+		if rec, ok := m.selectedRecord(); ok {
+			strip = errStyle.Render(clampWidth(confirmDeletePrompt(rec), width))
+		}
 	case m.confirmOverwrite:
-		strip = "already transcribed, overwrite? [y/n]"
+		strip = errStyle.Render(clampWidth(confirmOverwritePrompt(m.transcribeTarget), width))
 	case m.statusMsg != "":
 		strip = m.renderStatus()
 	}
 	return strip + "\n\n" + body
 }
 
+// emptyStateBody replaces bubbles' generic "No items." with an invitation to
+// action, shown when there are no recordings at all yet.
+func (m Model) emptyStateBody() string {
+	return accentStyle.Render("no recordings yet") + "\npress r to record your first call"
+}
+
 func (m Model) renderStatus() string {
-	if m.statusIsErr {
-		return errStyle.Render(m.statusMsg)
+	msg := m.statusMsg
+	// Status messages built by truncatedPathLine already carry an OSC 8
+	// hyperlink and are already clamped to width; clamping them again with
+	// an ANSI-code-agnostic pass could split the escape sequence.
+	if !strings.Contains(msg, "\x1b]8;;") {
+		msg = clampWidth(msg, m.contentWidth())
 	}
-	return accentStyle.Render(m.statusMsg)
+	if m.statusIsErr {
+		return errStyle.Render(msg)
+	}
+	return accentStyle.Render(msg)
 }
 
 func (m Model) nameFormView() string {
@@ -657,10 +762,7 @@ func (m Model) nameFormView() string {
 
 func (m Model) detailView() string {
 	r := m.detailRec
-	name := r.Slug
-	if name == "" {
-		name = r.ID
-	}
+	width := m.contentWidth()
 	duration := "-"
 	if r.HasDuration {
 		duration = records.FormatDuration(r.DurationSeconds)
@@ -671,11 +773,11 @@ func (m Model) detailView() string {
 	}
 
 	lines := []string{
-		name,
+		recordDisplayName(r),
 		r.Date.Format("2006-01-02 15:04"),
 		"duration: " + duration,
 		"size: " + records.FormatSize(r.SizeBytes),
-		"path: " + hyperlink(m.detailPath, m.detailPath),
+		truncatedPathLine("path: ", m.detailPath, width),
 		"transcript: " + transcript,
 	}
 	if m.statusMsg != "" {
@@ -684,18 +786,19 @@ func (m Model) detailView() string {
 
 	switch {
 	case m.confirmDelete:
-		lines = append(lines, "", "delete this recording? [y/n]")
+		lines = append(lines, "", errStyle.Render(clampWidth(confirmDeletePrompt(m.detailRec), width)))
 	case m.confirmOverwrite:
-		lines = append(lines, "", "already transcribed, overwrite? [y/n]")
+		lines = append(lines, "", errStyle.Render(clampWidth(confirmOverwritePrompt(m.transcribeTarget), width)))
 	case len(m.detailPreview) > 0:
 		lines = append(lines, "", "--- transcript (preview) ---")
-		lines = append(lines, m.detailPreview...)
+		lines = append(lines, wrapLines(m.detailPreview, width)...)
 	}
 
 	return strings.Join(lines, "\n")
 }
 
 func (m Model) recordingView() string {
+	width := m.contentWidth()
 	elapsed := time.Since(m.sess.Start)
 	lines := []string{
 		recDotStyle.Render("●") + " " + recStatusLine(elapsed),
@@ -703,12 +806,12 @@ func (m Model) recordingView() string {
 	if l := m.levelLine(); l != "" {
 		lines = append(lines, l)
 	}
-	lines = append(lines, "", hyperlink(m.sess.RecordDir, m.sess.RecordDir), records.FormatSize(m.recSize))
+	lines = append(lines, "", truncatedPathLine("", m.sess.RecordDir, width), records.FormatSize(m.recSize))
 	if m.recWarning != "" {
-		lines = append(lines, errStyle.Render("warning: "+m.recWarning))
+		lines = append(lines, errStyle.Render(clampWidth("warning: "+m.recWarning, width)))
 	}
 	if m.confirmingQuit {
-		lines = append(lines, "", "discard recording without saving? [y/n]")
+		lines = append(lines, "", errStyle.Render(confirmDiscardPrompt()))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -733,12 +836,29 @@ func (m Model) downloadingView() string {
 
 func (m Model) transcribingView() string {
 	elapsed := time.Since(m.transcribeStart)
+	label := "transcribing..."
+	if m.transcribePhase == transcribePreparing {
+		label = "preparing audio..."
+	}
+	width := m.contentWidth()
 	lines := []string{
-		m.transcribeSpinner.View() + " transcribing... " + records.FormatDuration(elapsed.Seconds()),
+		m.transcribeSpinner.View() + " " + label + " " + records.FormatDuration(elapsed.Seconds()),
 		"",
 	}
-	lines = append(lines, m.transcribeLines...)
+	lines = append(lines, wrapLines(m.transcribeLines, width)...)
 	return strings.Join(lines, "\n")
+}
+
+// wrapLines word-wraps each of lines to width, for body text (like a
+// transcript preview or whisper-cli's own output) that isn't already
+// guaranteed to fit.
+func wrapLines(lines []string, width int) []string {
+	out := make([]string, len(lines))
+	style := bodyStyle(width)
+	for i, l := range lines {
+		out[i] = style.Render(l)
+	}
+	return out
 }
 
 // recStatusLine renders the elapsed-time half of the "● REC mm:ss" status
@@ -771,22 +891,46 @@ func appendCapped(lines []string, line string, max int) []string {
 	return lines
 }
 
-// footerFor renders the static help footer for mode.
-func footerFor(mode screen) string {
+// footer computes the help footer for the current mode, terminal width, and
+// (for the list) filter/empty-list state. Always a single clamped line.
+func (m Model) footer() string {
+	width := m.contentWidth()
+	if m.mode == modeList {
+		switch {
+		case m.list.FilterState() == list.Filtering:
+			return clampWidth("enter apply · esc cancel", width)
+		case len(m.list.Items()) == 0:
+			return clampWidth("r rec · q quit", width)
+		}
+	}
+	return clampWidth(footerFor(m.mode, width < footerCompactThreshold), width)
+}
+
+// footerFor renders the static help footer for mode, compact when the
+// terminal is narrow.
+func footerFor(mode screen, compact bool) string {
 	switch mode {
 	case modeList:
-		return "r rec · enter detail · t transcribe · o finder · d delete · / filter · q quit"
+		if compact {
+			return "r rec · ⏎ detail · t txs · o fndr · d del · / flt · q/ctrl+c quit"
+		}
+		return "r rec · enter detail · t transcribe · o finder · d delete · / filter · q/ctrl+c quit"
 	case modeDetail:
+		if compact {
+			return "t txs · o fndr · d del · esc list"
+		}
 		return "t transcribe · o finder · d delete · esc list"
 	case modeRecording:
-		return "s stop · q discard without saving"
+		return "s stop & save · x discard · ctrl+c stop & save"
 	case modeNameForm:
 		return "enter confirm · esc cancel"
 	case modeDownloading:
 		return "esc cancel download"
 	case modeTranscribing:
-		return "transcribing…"
-	case modeRecError, modeTranscribeMissingWhisper, modeTranscribeDownloadConfirm, modeTranscribeError:
+		return "esc cancel · ctrl+c cancel"
+	case modeTranscribeDownloadConfirm:
+		return "y download · any other key cancel"
+	case modeRecError, modeTranscribeMissingWhisper, modeTranscribeError:
 		return "press any key to continue"
 	default:
 		return ""

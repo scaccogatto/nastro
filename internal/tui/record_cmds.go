@@ -62,13 +62,19 @@ func startRecordingCmd(cfg config.Config, opts record.Options) tea.Cmd {
 	}
 }
 
-// awaitOrTickCmd is nastro-tap's session heartbeat: it either reports the
-// process having exited, a parsed VU-meter level, or -- if a second passes
-// first -- the audio file's current size, and expects to be re-issued after
-// every recTickMsg/levelMsg. It is the sole reader of sess.Wait() and
-// sess.Levels(), so stopping/killing must go through signalCmd/killCmd
-// rather than reading those channels themselves.
-func awaitOrTickCmd(sess *record.Session) tea.Cmd {
+// awaitCmd is nastro-tap's process/level heartbeat: it reports either the
+// process having exited or a parsed VU-meter level, and expects to be
+// re-issued after every levelMsg (not after tapExitedMsg, which ends the
+// session). It is the sole reader of sess.Wait() and sess.Levels(), so
+// stopping/killing must go through signalCmd/killCmd rather than reading
+// those channels themselves.
+//
+// Deliberately separate from sizeTickCmd: the two used to be one loop that
+// re-armed a single time.After(1s) on every message, so a VU-meter stream
+// at or above 1Hz (nastro-tap's normal rate) kept resetting the timer and
+// starved the on-disk size refresh. Splitting them means the size tick
+// fires on its own schedule no matter how chatty the levels are.
+func awaitCmd(sess *record.Session) tea.Cmd {
 	return func() tea.Msg {
 		for {
 			select {
@@ -79,16 +85,23 @@ func awaitOrTickCmd(sess *record.Session) tea.Cmd {
 					continue // closed right as the tap exits; loop picks that up
 				}
 				return levelMsg{lvl: lvl}
-			case <-time.After(time.Second):
-				info, err := os.Stat(sess.AudioPath)
-				var size int64
-				if err == nil {
-					size = info.Size()
-				}
-				return recTickMsg{size: size}
 			}
 		}
 	}
+}
+
+// sizeTickCmd is the recording screen's independent once-a-second heartbeat
+// for the audio file's on-disk size (see awaitCmd's doc comment for why it's
+// not part of that loop).
+func sizeTickCmd(sess *record.Session) tea.Cmd {
+	return tea.Tick(time.Second, func(time.Time) tea.Msg {
+		info, err := os.Stat(sess.AudioPath)
+		var size int64
+		if err == nil {
+			size = info.Size()
+		}
+		return recTickMsg{size: size}
+	})
 }
 
 // signalCmd forwards sig to nastro-tap without waiting for it to exit; the

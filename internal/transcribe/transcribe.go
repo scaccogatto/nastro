@@ -89,11 +89,15 @@ func CheckModel(homeDir, model string) bool {
 }
 
 // ConvertToWav converts audioPath (the recording's .m4a) to a 16kHz mono
-// WAV at wavPath via afconvert, the format whisper-cli expects.
-func ConvertToWav(audioPath, wavPath string) error {
-	cmd := exec.Command("afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", audioPath, wavPath)
+// WAV at wavPath via afconvert, the format whisper-cli expects. Canceling
+// ctx kills afconvert and reports context.Canceled.
+func ConvertToWav(ctx context.Context, audioPath, wavPath string) error {
+	cmd := exec.CommandContext(ctx, "afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", audioPath, wavPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		if ctx.Err() != nil {
+			return context.Canceled
+		}
 		return fmt.Errorf("afconvert: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -112,13 +116,17 @@ type Job struct {
 // lines, is delivered on. Closed once the process's output pipe reaches EOF.
 func (j *Job) Lines() <-chan string { return j.lines }
 
-// Wait returns the channel whisper-cli's exit is delivered on, exactly once.
+// Wait returns the channel whisper-cli's exit is delivered on, exactly once:
+// nil on success, context.Canceled if ctx was canceled, or the underlying
+// error otherwise.
 func (j *Job) Wait() <-chan error { return j.waitErr }
 
 // StartWhisper spawns whisper-cli over wavPath, writing outPrefix+".txt" and
-// outPrefix+".srt".
-func StartWhisper(modelPath, lang, outPrefix, wavPath string) (*Job, error) {
-	cmd := exec.Command("whisper-cli", "-m", modelPath, "-l", lang, "-otxt", "-osrt", "-of", outPrefix, "-f", wavPath)
+// outPrefix+".srt". Canceling ctx kills whisper-cli and removes whatever
+// partial .txt/.srt it had written, so a canceled job never leaves a
+// half-written transcript behind.
+func StartWhisper(ctx context.Context, modelPath, lang, outPrefix, wavPath string) (*Job, error) {
+	cmd := exec.CommandContext(ctx, "whisper-cli", "-m", modelPath, "-l", lang, "-otxt", "-osrt", "-of", outPrefix, "-f", wavPath)
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -133,6 +141,11 @@ func StartWhisper(modelPath, lang, outPrefix, wavPath string) (*Job, error) {
 	go func() {
 		err := cmd.Wait()
 		pw.Close()
+		if ctx.Err() != nil {
+			os.Remove(outPrefix + ".txt")
+			os.Remove(outPrefix + ".srt")
+			err = context.Canceled
+		}
 		waitErr <- err
 	}()
 
@@ -302,12 +315,12 @@ func Run(cfg config.Config, idOrLast string) error {
 	tmpWav.Close()
 	defer os.Remove(tmpWavPath)
 
-	if err := ConvertToWav(audioPath, tmpWavPath); err != nil {
+	if err := ConvertToWav(context.Background(), audioPath, tmpWavPath); err != nil {
 		return err
 	}
 
 	modelPath := ModelPath(home, cfg.WhisperModel)
-	job, err := StartWhisper(modelPath, cfg.Lang, filepath.Join(recordDir, "transcript"), tmpWavPath)
+	job, err := StartWhisper(context.Background(), modelPath, cfg.Lang, filepath.Join(recordDir, "transcript"), tmpWavPath)
 	if err != nil {
 		return err
 	}

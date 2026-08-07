@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 
@@ -65,7 +66,8 @@ func awaitDownloadCmd(job *transcribe.DownloadJob) tea.Cmd {
 }
 
 // transcribeStartedMsg is delivered once afconvert + whisper-cli have been
-// kicked off (or failed to start).
+// kicked off (or failed to start, including via cancellation: err wraps
+// context.Canceled then).
 type transcribeStartedMsg struct {
 	job        *transcribe.Job
 	tmpWavPath string
@@ -75,8 +77,9 @@ type transcribeStartedMsg struct {
 // startTranscribeRunCmd converts rec's audio to WAV and starts whisper-cli
 // over it. tmpWavPath is only removed once the whisper-cli job is observed
 // to finish (see the Model's transcribeDoneMsg handling), since it's still
-// being read by the subprocess until then.
-func startTranscribeRunCmd(cfg config.Config, rec records.Record) tea.Cmd {
+// being read by the subprocess until then. Canceling ctx aborts whichever of
+// the two subprocesses is running.
+func startTranscribeRunCmd(ctx context.Context, cfg config.Config, rec records.Record) tea.Cmd {
 	return func() tea.Msg {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -91,13 +94,13 @@ func startTranscribeRunCmd(cfg config.Config, rec records.Record) tea.Cmd {
 		tmpWavPath := tmpWav.Name()
 		tmpWav.Close()
 
-		if err := transcribe.ConvertToWav(filepath.Join(recordDir, "audio.m4a"), tmpWavPath); err != nil {
+		if err := transcribe.ConvertToWav(ctx, filepath.Join(recordDir, "audio.m4a"), tmpWavPath); err != nil {
 			os.Remove(tmpWavPath)
 			return transcribeStartedMsg{err: err}
 		}
 
 		modelPath := transcribe.ModelPath(home, cfg.WhisperModel)
-		job, err := transcribe.StartWhisper(modelPath, cfg.Lang, filepath.Join(recordDir, "transcript"), tmpWavPath)
+		job, err := transcribe.StartWhisper(ctx, modelPath, cfg.Lang, filepath.Join(recordDir, "transcript"), tmpWavPath)
 		if err != nil {
 			os.Remove(tmpWavPath)
 			return transcribeStartedMsg{err: err}
