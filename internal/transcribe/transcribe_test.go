@@ -203,16 +203,34 @@ func TestFriendlyTranscribeError(t *testing.T) {
 	}
 }
 
+// fakeWhisperSuccessScript stands in for a whisper-cli run that succeeds: it
+// captures its full argv to argsFile (before shift consumes it) and writes
+// dummy output at the prefix passed via -of, then exits 0 -- enough for
+// StartWhisper's finalizeTranscript rename to have something to promote.
+const fakeWhisperSuccessScript = `#!/bin/sh
+echo "$*" > ARGSFILE
+prefix=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-of" ]; then
+    prefix="$2"
+  fi
+  shift
+done
+echo done > "${prefix}.txt"
+echo done > "${prefix}.srt"
+`
+
 func TestStartWhisperEnablesPrintProgress(t *testing.T) {
 	scriptDir := t.TempDir()
 	argsFile := filepath.Join(scriptDir, "args.txt")
-	script := "#!/bin/sh\necho \"$*\" > " + argsFile + "\n"
+	script := strings.Replace(fakeWhisperSuccessScript, "ARGSFILE", argsFile, 1)
 	if err := os.WriteFile(filepath.Join(scriptDir, "whisper-cli"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake whisper-cli: %v", err)
 	}
 	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
 
-	job, err := StartWhisper(context.Background(), "model.bin", "en", filepath.Join(t.TempDir(), "transcript"), "audio.wav")
+	outPrefix := filepath.Join(t.TempDir(), "transcript")
+	job, err := StartWhisper(context.Background(), "model.bin", "en", outPrefix, "audio.wav")
 	if err != nil {
 		t.Fatalf("StartWhisper: %v", err)
 	}
@@ -226,6 +244,40 @@ func TestStartWhisperEnablesPrintProgress(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "-pp") {
 		t.Errorf("whisper-cli args = %q, want it to contain -pp (--print-progress)", got)
+	}
+}
+
+// TestStartWhisperSuccessFinalizesPartialOutput verifies the H3 fix: a
+// successful run's partial output is renamed (not left) at outPrefix, and
+// no .partial.txt/.srt is left behind.
+func TestStartWhisperSuccessFinalizesPartialOutput(t *testing.T) {
+	scriptDir := t.TempDir()
+	script := strings.Replace(fakeWhisperSuccessScript, "ARGSFILE", filepath.Join(scriptDir, "args.txt"), 1)
+	if err := os.WriteFile(filepath.Join(scriptDir, "whisper-cli"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake whisper-cli: %v", err)
+	}
+	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
+
+	outPrefix := filepath.Join(t.TempDir(), "transcript")
+	job, err := StartWhisper(context.Background(), "model.bin", "en", outPrefix, "audio.wav")
+	if err != nil {
+		t.Fatalf("StartWhisper: %v", err)
+	}
+	if err := <-job.Wait(); err != nil {
+		t.Fatalf("Wait(): %v", err)
+	}
+
+	if _, statErr := os.Stat(outPrefix + ".txt"); statErr != nil {
+		t.Errorf("outPrefix.txt missing after successful run: %v", statErr)
+	}
+	if _, statErr := os.Stat(outPrefix + ".srt"); statErr != nil {
+		t.Errorf("outPrefix.srt missing after successful run: %v", statErr)
+	}
+	if _, statErr := os.Stat(outPrefix + ".partial.txt"); !os.IsNotExist(statErr) {
+		t.Errorf(".partial.txt still exists after successful run")
+	}
+	if _, statErr := os.Stat(outPrefix + ".partial.srt"); !os.IsNotExist(statErr) {
+		t.Errorf(".partial.srt still exists after successful run")
 	}
 }
 
@@ -337,7 +389,7 @@ func TestStartWhisperCancelCleansUpPartialOutput(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, statErr := os.Stat(outPrefix + ".txt"); statErr == nil {
+		if _, statErr := os.Stat(outPrefix + ".partial.txt"); statErr == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -350,11 +402,78 @@ func TestStartWhisperCancelCleansUpPartialOutput(t *testing.T) {
 	if err := <-job.Wait(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Wait() = %v, want context.Canceled", err)
 	}
-	if _, statErr := os.Stat(outPrefix + ".txt"); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(outPrefix + ".partial.txt"); !os.IsNotExist(statErr) {
 		t.Errorf("partial .txt still exists after cancel")
 	}
-	if _, statErr := os.Stat(outPrefix + ".srt"); !os.IsNotExist(statErr) {
+	if _, statErr := os.Stat(outPrefix + ".partial.srt"); !os.IsNotExist(statErr) {
 		t.Errorf("partial .srt still exists after cancel")
+	}
+	if _, statErr := os.Stat(outPrefix + ".txt"); !os.IsNotExist(statErr) {
+		t.Errorf("final .txt should never have been created by a canceled run")
+	}
+}
+
+// TestStartWhisperCancelPreservesExistingTranscript is the H3 regression
+// test: canceling a re-transcribe over a record that already has a
+// transcript must leave that old transcript completely untouched -- never
+// even briefly overwritten -- and only the .partial temp files cleaned up.
+func TestStartWhisperCancelPreservesExistingTranscript(t *testing.T) {
+	scriptDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(scriptDir, "whisper-cli"), []byte(fakeWhisperScript), 0o755); err != nil {
+		t.Fatalf("write fake whisper-cli: %v", err)
+	}
+	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
+
+	outPrefix := filepath.Join(t.TempDir(), "transcript")
+	const oldTxt, oldSrt = "the old, previously-transcribed content", "old srt content"
+	if err := os.WriteFile(outPrefix+".txt", []byte(oldTxt), 0o644); err != nil {
+		t.Fatalf("seed old transcript.txt: %v", err)
+	}
+	if err := os.WriteFile(outPrefix+".srt", []byte(oldSrt), 0o644); err != nil {
+		t.Fatalf("seed old transcript.srt: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	job, err := StartWhisper(ctx, "model.bin", "en", outPrefix, "audio.wav")
+	if err != nil {
+		t.Fatalf("StartWhisper: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, statErr := os.Stat(outPrefix + ".partial.txt"); statErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fake whisper-cli never wrote partial output")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	if err := <-job.Wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait() = %v, want context.Canceled", err)
+	}
+
+	gotTxt, err := os.ReadFile(outPrefix + ".txt")
+	if err != nil {
+		t.Fatalf("read old transcript.txt after cancel: %v", err)
+	}
+	if string(gotTxt) != oldTxt {
+		t.Errorf("transcript.txt = %q after canceled re-transcribe, want the untouched old content %q", gotTxt, oldTxt)
+	}
+	gotSrt, err := os.ReadFile(outPrefix + ".srt")
+	if err != nil {
+		t.Fatalf("read old transcript.srt after cancel: %v", err)
+	}
+	if string(gotSrt) != oldSrt {
+		t.Errorf("transcript.srt = %q after canceled re-transcribe, want the untouched old content %q", gotSrt, oldSrt)
+	}
+	if _, statErr := os.Stat(outPrefix + ".partial.txt"); !os.IsNotExist(statErr) {
+		t.Errorf(".partial.txt still exists after cancel")
+	}
+	if _, statErr := os.Stat(outPrefix + ".partial.srt"); !os.IsNotExist(statErr) {
+		t.Errorf(".partial.srt still exists after cancel")
 	}
 }
 

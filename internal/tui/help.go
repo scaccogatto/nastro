@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/viewport"
+
 	"github.com/scaccogatto/nastro/internal/transcribe"
 )
 
@@ -18,16 +20,19 @@ type helpSection struct {
 var helpSections = []helpSection{
 	{"list", []string{"r rec", "enter detail", "t transcribe", "o finder", "d delete", "/ filter", "? help", "q/ctrl+c quit"}},
 	{"detail", []string{"t transcribe", "o finder", "d delete", "esc list"}},
-	{"recording", []string{"s stop & save", "x discard", "ctrl+c stop & save"}},
-	{"name form", []string{"enter confirm", "tab mode", "esc cancel"}},
-	{"downloading model", []string{"esc cancel download"}},
+	{"recording", []string{"s stop & save", "q stop & save", "x discard", "ctrl+c stop & save"}},
+	{"name form", []string{"enter confirm", "tab mode", "esc/ctrl+c cancel"}},
+	{"downloading model", []string{"esc cancel download", "ctrl+c cancel download"}},
 	{"transcribing", []string{"esc cancel", "ctrl+c cancel"}},
+	{"download confirm", []string{"y download", "q/any other key cancel"}},
 	{"message screens (missing whisper-cli, errors)", []string{"any key continue"}},
 }
 
-// helpView renders the help overlay: every screen's keybindings, useful
-// paths, and the crash-survival guarantee.
-func (m Model) helpView() string {
+// helpContent renders the help overlay's full text: every screen's
+// keybindings, useful paths, and the crash-survival guarantee. Fed into
+// helpViewport (see enterHelp) rather than shown directly, so it scrolls
+// instead of overflowing short terminals.
+func helpContent(m Model) string {
 	width := m.contentWidth()
 	var lines []string
 	lines = append(lines, accentStyle.Render("keybindings"), "")
@@ -50,4 +55,14 @@ func (m Model) helpView() string {
 	lines = append(lines, "recordings survive crashes: audio is written incrementally")
 
 	return strings.Join(wrapLines(lines, width), "\n")
+}
+
+// helpFooter renders the help overlay's footer, appending a "more below"
+// hint when vp hasn't scrolled all the way to the bottom.
+func helpFooter(vp viewport.Model) string {
+	base := "↑/↓ scroll · any other key close"
+	if vp.AtBottom() {
+		return base
+	}
+	return base + " · ↓ more"
 }

@@ -15,6 +15,7 @@ import (
 	"github.com/scaccogatto/nastro/internal/config"
 	"github.com/scaccogatto/nastro/internal/record"
 	"github.com/scaccogatto/nastro/internal/records"
+	"github.com/scaccogatto/nastro/internal/transcribe"
 )
 
 func TestUpdateQuitsOnQ(t *testing.T) {
@@ -293,11 +294,11 @@ func TestEmptyListShowsInviteNotNoItems(t *testing.T) {
 }
 
 func TestDetailEscReturnsToList(t *testing.T) {
-	m := Model{mode: modeDetail}
+	m := Model{mode: modeDetail, cfg: config.Config{OutputDir: t.TempDir()}}
 
 	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "esc"})
-	if cmd != nil {
-		t.Errorf("Update(esc) in detail cmd = %v, want nil", cmd)
+	if cmd == nil {
+		t.Fatalf("Update(esc) in detail cmd = nil, want rescanCmd so the list's checkmark stays fresh (H4)")
 	}
 	if newModel.(Model).mode != modeList {
 		t.Errorf("Update(esc) in detail mode = %v, want modeList", newModel.(Model).mode)
@@ -611,9 +612,10 @@ func TestUpdateKeyTranscribingCtrlCCancelsInsteadOfQuitting(t *testing.T) {
 	}
 }
 
-func TestHandleTranscribeDoneCanceledShowsStatusOnReturnScreen(t *testing.T) {
+func TestHandleTranscribeDoneCanceledReturnsToListWithRescan(t *testing.T) {
 	m := Model{
 		mode:             modeTranscribing,
+		cfg:              config.Config{OutputDir: t.TempDir()},
 		transcribeReturn: modeList,
 		transcribeCancel: func() {},
 	}
@@ -632,8 +634,17 @@ func TestHandleTranscribeDoneCanceledShowsStatusOnReturnScreen(t *testing.T) {
 	if nm.transcribeCancel != nil {
 		t.Errorf("transcribeCancel not cleared after done")
 	}
-	if cmd != nil {
-		t.Errorf("cmd = %v, want nil", cmd)
+	// H4: canceling back to the list must rescan, so a stale ✓ (or its
+	// absence) doesn't linger.
+	if cmd == nil {
+		t.Fatalf("cmd = nil, want rescanCmd")
+	}
+	msg, ok := cmd().(recordsReloadedMsg)
+	if !ok {
+		t.Fatalf("cmd() = %T, want recordsReloadedMsg", cmd())
+	}
+	if msg.status != "transcription canceled" {
+		t.Errorf("recordsReloadedMsg.status = %q, want %q", msg.status, "transcription canceled")
 	}
 }
 
@@ -650,6 +661,25 @@ func TestHandleTranscribeStartedCanceledDuringPreparing(t *testing.T) {
 	}
 	if cmd != nil {
 		t.Errorf("cmd = %v, want nil", cmd)
+	}
+}
+
+func TestHandleTranscribeStartedCanceledReturnsToListWithRescan(t *testing.T) {
+	m := Model{
+		mode:             modeTranscribing,
+		cfg:              config.Config{OutputDir: t.TempDir()},
+		transcribeReturn: modeList,
+		transcribeCancel: func() {},
+	}
+
+	newModel, cmd := m.Update(transcribeStartedMsg{err: context.Canceled})
+	nm := newModel.(Model)
+	if nm.mode != modeList {
+		t.Errorf("mode = %v, want modeList (transcribeReturn)", nm.mode)
+	}
+	// H4: canceling back to the list must rescan.
+	if cmd == nil {
+		t.Fatalf("cmd = nil, want rescanCmd")
 	}
 }
 
@@ -744,7 +774,7 @@ func TestLevelMsgUpdatesLevelAndReissuesAwait(t *testing.T) {
 		t.Errorf("level = %+v, want %+v", nm.level, lvl)
 	}
 	if cmd == nil {
-		t.Errorf("cmd = nil, want awaitOrTickCmd re-issued")
+		t.Errorf("cmd = nil, want awaitCmd re-issued")
 	}
 }
 
@@ -812,5 +842,89 @@ func TestWindowSizeReservesFooterAndStatus(t *testing.T) {
 	want := 24 - v - chromeLines
 	if got != want {
 		t.Errorf("list.Height() after WindowSizeMsg = %d, want %d (chrome reserved)", got, want)
+	}
+}
+
+// TestFooterShowsConfirmPromptDuringConfirm is H5: while a y/n confirmation
+// is active (delete, transcribe-overwrite, discard-recording), the footer
+// must say so instead of showing the underlying mode's usual footer (which
+// would wrongly advertise e.g. "q quit" while q actually cancels).
+func TestFooterShowsConfirmPromptDuringConfirm(t *testing.T) {
+	want := "y confirm · any other key cancel"
+	tests := []struct {
+		name string
+		m    Model
+	}{
+		{"confirmDelete in list", Model{mode: modeList, confirmDelete: true}},
+		{"confirmOverwrite in detail", Model{mode: modeDetail, confirmOverwrite: true}},
+		{"confirmingQuit in recording", Model{mode: modeRecording, confirmingQuit: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.m.footer(); got != want {
+				t.Errorf("footer() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestComposeFooterKeepsFirstAndLastWhenNarrow(t *testing.T) {
+	entries := []string{"r rec", "enter open", "t transcribe", "d delete", "? help", "q quit"}
+	got := composeFooter(entries, 12)
+	if !strings.HasPrefix(got, "r rec") {
+		t.Errorf("composeFooter(narrow) = %q, want it to keep the first entry (r rec)", got)
+	}
+	if !strings.Contains(got, "q") {
+		t.Errorf("composeFooter(narrow) = %q, want the quit key (q) to survive narrowing, not be the first thing clamped away", got)
+	}
+}
+
+func TestListCompactFooterUsesWholeWordsNotAbbreviations(t *testing.T) {
+	got := footerFor(modeList, true)
+	for _, abbrev := range []string{"txs", "fndr", "flt"} {
+		if strings.Contains(got, abbrev) {
+			t.Errorf("footerFor(modeList, compact) = %q, still contains consonant-abbreviation %q (H6)", got, abbrev)
+		}
+	}
+	if !strings.Contains(got, "q quit") {
+		t.Errorf("footerFor(modeList, compact) = %q, want it to still show the quit key", got)
+	}
+}
+
+func TestUpdateKeyDownloadingCtrlCCancels(t *testing.T) {
+	m := Model{mode: modeDownloading, downloadJob: transcribe.StartModelDownload("http://127.0.0.1:1/nope", filepath.Join(t.TempDir(), "model.bin"))}
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c"})
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Errorf("Update(ctrl+c) in modeDownloading returned tea.Quit, want it to cancel the download instead")
+		}
+	}
+	if err := <-m.downloadJob.Wait(); !errors.Is(err, context.Canceled) {
+		t.Errorf("downloadJob outcome after ctrl+c = %v, want context.Canceled", err)
+	}
+}
+
+func TestNameFormCtrlCCancelsBackToList(t *testing.T) {
+	m := Model{mode: modeNameForm}
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c"})
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Errorf("Update(ctrl+c) in name form returned tea.Quit, want it to cancel instead")
+		}
+	}
+	if newModel.(Model).mode != modeList {
+		t.Errorf("Update(ctrl+c) in name form mode = %v, want modeList", newModel.(Model).mode)
+	}
+}
+
+// TestNewProgressUsesANSIPaletteNoTruecolor is H2: the progress bars must
+// use the shared ANSI accent/muted colors, not bubbles' default truecolor
+// gradient (which shows up as ESC[38;2;... codes).
+func TestNewProgressUsesANSIPaletteNoTruecolor(t *testing.T) {
+	p := newProgress()
+	p.SetWidth(20)
+	got := p.ViewAs(0.5)
+	if strings.Contains(got, "38;2") || strings.Contains(got, "48;2") {
+		t.Errorf("newProgress().ViewAs() = %q, contains a truecolor escape code", got)
 	}
 }

@@ -178,12 +178,18 @@ func (j *Job) Lines() <-chan string { return j.lines }
 // error otherwise.
 func (j *Job) Wait() <-chan error { return j.waitErr }
 
-// StartWhisper spawns whisper-cli over wavPath, writing outPrefix+".txt" and
-// outPrefix+".srt". Canceling ctx kills whisper-cli and removes whatever
-// partial .txt/.srt it had written, so a canceled job never leaves a
-// half-written transcript behind.
+// StartWhisper spawns whisper-cli over wavPath, writing to a temporary
+// outPrefix+".partial" prefix first. Only once the run succeeds are
+// outPrefix+".partial.txt"/".srt" renamed (atomically) to outPrefix+".txt"/
+// ".srt", overwriting a previous transcript at that point and no sooner --
+// so a canceled or failed run never touches, let alone destroys, whatever
+// transcript.txt/.srt was already there (principle #1: never destroy data
+// on an aborted operation). Canceling ctx kills whisper-cli and removes
+// whatever partial output it had written; a non-cancel failure does the
+// same.
 func StartWhisper(ctx context.Context, modelPath, lang, outPrefix, wavPath string) (*Job, error) {
-	cmd := exec.CommandContext(ctx, "whisper-cli", "-m", modelPath, "-l", lang, "-otxt", "-osrt", "-of", outPrefix, "-pp", "-f", wavPath)
+	partialPrefix := outPrefix + ".partial"
+	cmd := exec.CommandContext(ctx, "whisper-cli", "-m", modelPath, "-l", lang, "-otxt", "-osrt", "-of", partialPrefix, "-pp", "-f", wavPath)
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -196,17 +202,31 @@ func StartWhisper(ctx context.Context, modelPath, lang, outPrefix, wavPath strin
 	waitErr := make(chan error, 1)
 	go streamLines(pr, lines)
 	go func() {
-		err := cmd.Wait()
+		runErr := cmd.Wait()
 		pw.Close()
 		if ctx.Err() != nil {
-			os.Remove(outPrefix + ".txt")
-			os.Remove(outPrefix + ".srt")
-			err = context.Canceled
+			runErr = context.Canceled
 		}
-		waitErr <- err
+		if runErr != nil {
+			os.Remove(partialPrefix + ".txt")
+			os.Remove(partialPrefix + ".srt")
+		} else if finalizeErr := finalizeTranscript(partialPrefix, outPrefix); finalizeErr != nil {
+			runErr = finalizeErr
+		}
+		waitErr <- runErr
 	}()
 
 	return &Job{cmd: cmd, lines: lines, waitErr: waitErr}, nil
+}
+
+// finalizeTranscript atomically promotes a successful run's partial
+// .txt/.srt output to outPrefix, overwriting any previous transcript only
+// now that the new one is known-complete.
+func finalizeTranscript(partialPrefix, outPrefix string) error {
+	if err := os.Rename(partialPrefix+".txt", outPrefix+".txt"); err != nil {
+		return err
+	}
+	return os.Rename(partialPrefix+".srt", outPrefix+".srt")
 }
 
 func streamLines(r io.Reader, out chan<- string) {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/progress"
 	"charm.land/lipgloss/v2"
 )
 
@@ -24,6 +25,17 @@ var (
 	normalRow   = lipgloss.NewStyle()
 )
 
+// newProgress builds a progress.Model filled with the shared ANSI accent
+// color as a solid fill, instead of bubbles' default truecolor purple/pink
+// gradient -- so it inherits the terminal's theme like everything else here
+// (see the Palette comment above) rather than carrying its own hardcoded
+// colors.
+func newProgress() progress.Model {
+	p := progress.New(progress.WithColors(colorAccent))
+	p.EmptyColor = colorMuted
+	return p
+}
+
 // bodyStyle word-wraps body text (error messages, transcript previews,
 // whisper-cli output) to width, rather than letting it overflow the
 // terminal.
@@ -43,6 +55,8 @@ func themedListStyles() list.Styles {
 	s.StatusEmpty = lipgloss.NewStyle().Foreground(colorMuted)
 	s.StatusBarActiveFilter = lipgloss.NewStyle().Foreground(colorAccent)
 	s.NoItems = lipgloss.NewStyle().Foreground(colorMuted)
+	s.StatusBarFilterCount = lipgloss.NewStyle().Foreground(colorMuted)
+	s.DividerDot = lipgloss.NewStyle().Foreground(colorMuted).SetString(" • ")
 	s.DefaultFilterCharacterMatch = lipgloss.NewStyle().Underline(true).Foreground(colorAccent)
 	s.Filter.Focused.Prompt = lipgloss.NewStyle().Foreground(colorAccent)
 	s.Filter.Blurred.Prompt = lipgloss.NewStyle().Foreground(colorMuted)

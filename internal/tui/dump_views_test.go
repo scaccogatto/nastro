@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/scaccogatto/nastro/internal/config"
@@ -64,10 +65,10 @@ func TestDumpViews(t *testing.T) {
 	m.statusMsg = "saved /tmp/dump/2026-08-07-1430-cliente-eppi"
 	render(t, "list with ok status", m, 100, 30)
 
-	msRaw, _ := New(cfg, dumpRecs()).Update(tea.WindowSizeMsg{Width: 100, Height: 30})
-	ms := msRaw.(Model)
+	ms := New(cfg, dumpRecs())
 	ms.homeDir = "/Users/alex"
-	ms.statusMsg = formatSavedStatus(2527, "/Users/alex/Recordings/nastro/2026-08-07-1430-cliente-eppi", ms.homeDir, ms.contentWidth())
+	ms.savedStatusDir = "/Users/alex/Recordings/nastro/2026-08-07-1430-cliente-eppi"
+	ms.savedStatusDuration = 2527
 	render(t, "list with saved status (peak-end)", ms, 100, 30)
 
 	me := New(cfg, dumpRecs())
@@ -78,6 +79,14 @@ func TestDumpViews(t *testing.T) {
 	md := New(cfg, dumpRecs())
 	md.confirmDelete = true
 	render(t, "list confirm delete", md, 100, 30)
+
+	lf := New(cfg, dumpRecs())
+	lf.list.SetFilterState(list.Filtering)
+	render(t, "list filtering", lf, 100, 30)
+
+	rd := dumpRecordingModel(cfg)
+	rd.confirmingQuit = true
+	render(t, "recording (confirm discard)", rd, 100, 30)
 
 	nf := New(cfg, dumpRecs())
 	nf.mode = modeNameForm
@@ -90,6 +99,7 @@ func TestDumpViews(t *testing.T) {
 
 	tr := New(cfg, dumpRecs())
 	tr.mode = modeTranscribing
+	tr.transcribeTarget = dumpRecs()[0]
 	tr.transcribePhase = transcribeRunning
 	tr.transcribeStart = time.Now().Add(-37 * time.Second)
 	tr.transcribeHasPct = true
@@ -98,14 +108,22 @@ func TestDumpViews(t *testing.T) {
 
 	trs := New(cfg, dumpRecs())
 	trs.mode = modeTranscribing
+	trs.transcribeTarget = dumpRecs()[1]
 	trs.transcribePhase = transcribePreparing
 	trs.transcribeStart = time.Now().Add(-3 * time.Second)
 	render(t, "transcribing (preparing audio, spinner fallback)", trs, 100, 30)
+
+	dw := New(cfg, dumpRecs())
+	dw.mode = modeDownloading
+	dw.transcribeTarget = dumpRecs()[2]
+	dw.downloadPct = 0.62
+	render(t, "downloading (progress)", dw, 100, 30)
 
 	hp := New(cfg, dumpRecs())
 	hp.mode = modeHelp
 	hp.homeDir = "/Users/alex"
 	render(t, "help overlay", hp, 100, 30)
+	render(t, "help overlay (must scroll, standard height)", hp, 80, 24)
 
 	dt := New(cfg, dumpRecs())
 	dt.mode = modeDetail
@@ -116,6 +134,7 @@ func TestDumpViews(t *testing.T) {
 
 	dl := New(cfg, dumpRecs())
 	dl.mode = modeTranscribeDownloadConfirm
+	dl.transcribeTarget = dumpRecs()[2]
 	render(t, "download confirm", dl, 100, 30)
 
 	mw := New(cfg, dumpRecs())

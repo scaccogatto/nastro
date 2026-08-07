@@ -69,7 +69,7 @@ func abbreviateHome(path, homeDir string) string {
 // committing.
 func (m Model) nameFormView() string {
 	lines := []string{
-		"recording name, enter for timestamp",
+		"new recording",
 		"",
 		m.nameInput.View(),
 		footerStyle.Render("mode: " + captureModeLabel(m.nameFormMode) + " ▸ (tab to change)"),

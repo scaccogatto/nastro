@@ -105,7 +105,7 @@ func sizeTickCmd(sess *record.Session) tea.Cmd {
 }
 
 // signalCmd forwards sig to nastro-tap without waiting for it to exit; the
-// exit itself is observed by the already-running awaitOrTickCmd loop.
+// exit itself is observed by the already-running awaitCmd loop.
 func signalCmd(sess *record.Session, sig os.Signal) tea.Cmd {
 	return func() tea.Msg {
 		_ = sess.Signal(sig)

@@ -115,7 +115,7 @@ type transcribeLineMsg struct{ line string }
 // transcribeDoneMsg is delivered once, when whisper-cli exits.
 type transcribeDoneMsg struct{ err error }
 
-// awaitTranscribeCmd is whisper-cli's heartbeat, mirroring awaitOrTickCmd.
+// awaitTranscribeCmd is whisper-cli's heartbeat, mirroring awaitCmd.
 func awaitTranscribeCmd(job *transcribe.Job) tea.Cmd {
 	return func() tea.Msg {
 		for {
