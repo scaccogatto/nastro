@@ -130,6 +130,16 @@ func FormatSize(bytes int64) string {
 	return fmt.Sprintf("%.1f %s", val, units[idx])
 }
 
+// TranscriptPreview returns at most maxLines lines from content, for a
+// detail-view preview of a transcript.txt.
+func TranscriptPreview(content string, maxLines int) []string {
+	lines := strings.Split(content, "\n")
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+	}
+	return lines
+}
+
 // PlainLine renders r as a tab-separated line for `nastro records --plain`.
 func PlainLine(r Record) string {
 	duration := "-"

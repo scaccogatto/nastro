@@ -3,9 +3,11 @@
 package record
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -168,9 +170,68 @@ func ReleaseLock(f *os.File, outputDir string) error {
 	return os.Remove(LockPath(outputDir))
 }
 
+// Level is one second's worth of normalized (0..1) system/mic audio level.
+// HasSystem/HasMic track which keys nastro-tap actually printed: mic-only
+// and system-only recordings omit the inactive source's key.
+type Level struct {
+	System    float64
+	HasSystem bool
+	Mic       float64
+	HasMic    bool
+}
+
+// parseLevelLine parses one "level sys=0.42 mic=0.10" stdout line from
+// nastro-tap into a Level. ok is false for anything else: blank lines,
+// unrelated output, or an older nastro-tap that never emits levels at all --
+// callers are expected to degrade silently in that case.
+func parseLevelLine(line string) (Level, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 || fields[0] != "level" {
+		return Level{}, false
+	}
+
+	var lvl Level
+	for _, f := range fields[1:] {
+		key, val, ok := strings.Cut(f, "=")
+		if !ok {
+			continue
+		}
+		v, err := strconv.ParseFloat(val, 64)
+		if err != nil {
+			continue
+		}
+		switch key {
+		case "sys":
+			lvl.System, lvl.HasSystem = v, true
+		case "mic":
+			lvl.Mic, lvl.HasMic = v, true
+		}
+	}
+
+	if !lvl.HasSystem && !lvl.HasMic {
+		return Level{}, false
+	}
+	return lvl, true
+}
+
+// diskSpaceWarning reports whether availBlocks*blockSize (a Statfs_t's
+// Bavail/Bsize) is below the low-disk-space threshold, and if so, the
+// warning message to show. Pure over the syscall result so it's testable
+// without touching a real filesystem; callers decide whether/where to print
+// or display it.
+func diskSpaceWarning(dir string, availBlocks, blockSize uint64) (bool, string) {
+	const oneGB = 1 << 30
+	free := availBlocks * blockSize
+	if free >= oneGB {
+		return false, ""
+	}
+	return true, fmt.Sprintf("less than 1GB free space in %s", dir)
+}
+
 // --- everything below is side-effecting orchestration: subprocess exec,
 // signals, timers, disk stats. Deliberately outside TDD scope, except for
-// pure helpers pulled out along the way (DescribeTapExit), which are. ---
+// pure helpers pulled out along the way (DescribeTapExit, parseLevelLine,
+// diskSpaceWarning), which are. ---
 
 // Options holds the flags for `nastro record`.
 type Options struct {
@@ -191,8 +252,14 @@ type Session struct {
 	Stderr    *bytes.Buffer
 	Start     time.Time
 
+	// LowDiskWarning is non-empty when the output dir had less than 1GB free
+	// at start time. Set once, at Start; callers decide whether/where to
+	// show it (CLI: stderr, TUI: a status line).
+	LowDiskWarning string
+
 	lockFile *os.File
 	waitErr  chan error
+	levelCh  chan Level
 	released bool
 }
 
@@ -207,7 +274,7 @@ func Start(cfg config.Config, opts Options) (*Session, error) {
 	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
-	warnLowDiskSpace(cfg.OutputDir, os.Stderr)
+	_, diskWarning := checkLowDiskSpace(cfg.OutputDir)
 
 	lockFile, err := AcquireLock(cfg.OutputDir)
 	if err != nil {
@@ -239,6 +306,11 @@ func Start(cfg config.Config, opts Options) (*Session, error) {
 	var stderrBuf bytes.Buffer
 	cmd := exec.Command(tapPath, args...)
 	cmd.Stderr = &stderrBuf
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = ReleaseLock(lockFile, cfg.OutputDir)
+		return nil, fmt.Errorf("pipe nastro-tap stdout: %w", err)
+	}
 	if err := cmd.Start(); err != nil {
 		_ = ReleaseLock(lockFile, cfg.OutputDir)
 		return nil, fmt.Errorf("start nastro-tap: %w", err)
@@ -248,20 +320,33 @@ func Start(cfg config.Config, opts Options) (*Session, error) {
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()
 
+	levelCh := make(chan Level, 1)
+	go streamLevels(stdout, levelCh)
+
 	return &Session{
-		Cmd:       cmd,
-		RecordDir: recordDir,
-		AudioPath: audioPath,
-		OutputDir: cfg.OutputDir,
-		Stderr:    &stderrBuf,
-		Start:     time.Now(),
-		lockFile:  lockFile,
-		waitErr:   waitErr,
+		Cmd:            cmd,
+		RecordDir:      recordDir,
+		AudioPath:      audioPath,
+		OutputDir:      cfg.OutputDir,
+		Stderr:         &stderrBuf,
+		Start:          time.Now(),
+		LowDiskWarning: diskWarning,
+		lockFile:       lockFile,
+		waitErr:        waitErr,
+		levelCh:        levelCh,
 	}, nil
 }
 
 // Wait returns the channel nastro-tap's exit is delivered on, exactly once.
 func (s *Session) Wait() <-chan error { return s.waitErr }
+
+// Levels returns the channel nastro-tap's parsed "level sys=.. mic=.."
+// stdout lines are delivered on, roughly once a second. A slow consumer just
+// misses intermediate ticks (latest-wins, non-blocking send): fine for a VU
+// meter. Never closed until the tap process exits (or, for an older
+// nastro-tap that never emits levels, not until then either -- it simply
+// never receives anything, which is the intended silent degradation).
+func (s *Session) Levels() <-chan Level { return s.levelCh }
 
 // Signal forwards an OS signal to nastro-tap.
 func (s *Session) Signal(sig os.Signal) error {
@@ -296,6 +381,9 @@ func Run(cfg config.Config, opts Options) error {
 	sess, err := Start(cfg, opts)
 	if err != nil {
 		return err
+	}
+	if sess.LowDiskWarning != "" {
+		fmt.Fprintln(os.Stderr, "warning: "+sess.LowDiskWarning)
 	}
 
 	sigCh := make(chan os.Signal, 1)
@@ -371,15 +459,32 @@ func printTimer(start time.Time, stop <-chan struct{}) {
 	}
 }
 
-func warnLowDiskSpace(dir string, stderr *os.File) {
+// checkLowDiskSpace is the side-effecting wrapper around diskSpaceWarning:
+// it statfs's dir and hands the result to the pure check.
+func checkLowDiskSpace(dir string) (bool, string) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(dir, &stat); err != nil {
-		return
+		return false, ""
 	}
-	const oneGB = 1 << 30
-	free := stat.Bavail * uint64(stat.Bsize)
-	if free < oneGB {
-		fmt.Fprintf(stderr, "warning: less than 1GB free space in %s\n", dir)
+	return diskSpaceWarning(dir, stat.Bavail, uint64(stat.Bsize))
+}
+
+// streamLevels scans r (nastro-tap's stdout) line by line, forwarding
+// parsed "level ..." lines to out. Never blocks the tap process on a slow
+// consumer: drops a tick rather than waiting. Closes out on EOF (i.e. once
+// the tap process's stdout pipe closes).
+func streamLevels(r io.Reader, out chan<- Level) {
+	defer close(out)
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		lvl, ok := parseLevelLine(scanner.Text())
+		if !ok {
+			continue
+		}
+		select {
+		case out <- lvl:
+		default:
+		}
 	}
 }
 

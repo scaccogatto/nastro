@@ -305,6 +305,48 @@ final class SampleMixer {
     }
 }
 
+// MARK: - Level meter
+
+/// Accumulates RMS audio level over an interval (fed from a capture callback
+/// thread), read and reset once a second from the main-queue level timer.
+final class LevelMeter {
+    private let lock = NSLock()
+    private var sumSquares: Double = 0
+    private var sampleCount: Int = 0
+
+    func accumulate(_ buffer: AVAudioPCMBuffer) {
+        guard let channels = buffer.floatChannelData else { return }
+        let frames = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        var sum: Double = 0
+        for ch in 0..<channelCount {
+            let data = channels[ch]
+            for f in 0..<frames {
+                let s = Double(data[f])
+                sum += s * s
+            }
+        }
+
+        lock.lock()
+        sumSquares += sum
+        sampleCount += frames * channelCount
+        lock.unlock()
+    }
+
+    /// Returns the normalized (0...1) RMS level for the accumulated interval
+    /// and resets the accumulator for the next one.
+    func consume() -> Double {
+        lock.lock()
+        defer {
+            sumSquares = 0
+            sampleCount = 0
+            lock.unlock()
+        }
+        guard sampleCount > 0 else { return 0 }
+        return min(1, (sumSquares / Double(sampleCount)).squareRoot())
+    }
+}
+
 // MARK: - Recorder
 
 final class Recorder {
@@ -322,12 +364,26 @@ final class Recorder {
     private var engine: AVAudioEngine?
     private var mixer: SampleMixer?
 
+    private let systemLevel = LevelMeter()
+    private let micLevel = LevelMeter()
+
     private var processTapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var deviceProcID: AudioDeviceIOProcID?
     private var tapStreamDescription: AudioStreamBasicDescription?
 
     var elapsedSeconds: Double { Date().timeIntervalSince(startDate) }
+
+    /// Consumes (and resets) the last second of levels for whichever
+    /// source(s) this recorder's mode actually captures -- nil for the
+    /// inactive source in mic-only/system-only mode.
+    func consumeLevels() -> (sys: Double?, mic: Double?) {
+        switch mode {
+        case .micOnly: return (nil, micLevel.consume())
+        case .systemOnly: return (systemLevel.consume(), nil)
+        case .mixed: return (systemLevel.consume(), micLevel.consume())
+        }
+    }
 
     init(outputURL: URL, mode: Mode) {
         self.outputURL = outputURL
@@ -406,6 +462,7 @@ final class Recorder {
         setAudioFile(file)
 
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            self?.micLevel.accumulate(buffer)
             self?.write(buffer)
         }
 
@@ -434,6 +491,7 @@ final class Recorder {
         setAudioFile(file)
 
         try startSystemIOProc { [weak self] buffer in
+            self?.systemLevel.accumulate(buffer)
             self?.write(buffer)
         }
     }
@@ -451,7 +509,8 @@ final class Recorder {
         let systemBuffer = AudioRingBuffer(
             channelCount: Int(systemFormat.channelCount),
             capacityFrames: Int(systemFormat.sampleRate * 2))
-        try startSystemIOProc { buffer in
+        try startSystemIOProc { [weak self] buffer in
+            self?.systemLevel.accumulate(buffer)
             systemBuffer.write(from: buffer)
         }
 
@@ -475,7 +534,8 @@ final class Recorder {
         let micBuffer = AudioRingBuffer(
             channelCount: Int(micFormat.channelCount),
             capacityFrames: Int(micFormat.sampleRate * 2))
-        input.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { buffer, _ in
+        input.installTap(onBus: 0, bufferSize: 4096, format: micFormat) { [weak self] buffer, _ in
+            self?.micLevel.accumulate(buffer)
             micBuffer.write(from: buffer)
         }
 
@@ -691,6 +751,27 @@ let statusTimer = DispatchSource.makeTimerSource(queue: .main)
 statusTimer.schedule(deadline: .now() + 5, repeating: 5)
 statusTimer.setEventHandler { writeMetadata() }
 statusTimer.resume()
+
+/// One stdout line per second: `level sys=<0.00..1.00> mic=<0.00..1.00>`,
+/// omitting whichever source isn't active in mic-only/system-only mode. The
+/// Go side treats this as a purely additive, best-effort signal -- an older
+/// nastro-tap that never prints it just means the TUI's VU meter doesn't
+/// appear, nothing else depends on it.
+func writeLevelLine(_ line: String) {
+    FileHandle.standardOutput.write((line + "\n").data(using: .utf8)!)
+}
+
+let levelTimer = DispatchSource.makeTimerSource(queue: .main)
+levelTimer.schedule(deadline: .now() + 1, repeating: 1)
+levelTimer.setEventHandler {
+    let (sys, mic) = recorder.consumeLevels()
+    var parts: [String] = []
+    if let sys { parts.append(String(format: "sys=%.2f", sys)) }
+    if let mic { parts.append(String(format: "mic=%.2f", mic)) }
+    guard !parts.isEmpty else { return }
+    writeLevelLine("level " + parts.joined(separator: " "))
+}
+levelTimer.resume()
 
 func shutdown() -> Never {
     hideRecordingIndicator()

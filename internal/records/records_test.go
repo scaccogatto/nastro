@@ -110,6 +110,34 @@ func TestFormatSize(t *testing.T) {
 	}
 }
 
+func TestTranscriptPreview(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		maxLines int
+		want     []string
+	}{
+		{"shorter than max", "one\ntwo\nthree", 15, []string{"one", "two", "three"}},
+		{"exactly max", "a\nb", 2, []string{"a", "b"}},
+		{"truncated", "a\nb\nc\nd", 2, []string{"a", "b"}},
+		{"empty content", "", 15, []string{""}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TranscriptPreview(tt.content, tt.maxLines)
+			if len(got) != len(tt.want) {
+				t.Fatalf("TranscriptPreview() = %+v, want %+v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("TranscriptPreview()[%d] = %q, want %q", i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestScan(t *testing.T) {
 	root := t.TempDir()
 
