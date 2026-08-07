@@ -210,7 +210,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case finderOpenedMsg:
 		if msg.err != nil {
-			m.statusMsg = "errore apertura Finder: " + msg.err.Error()
+			m.statusMsg = "error opening Finder: " + msg.err.Error()
 			m.statusIsErr = true
 		}
 		return m, nil
@@ -219,7 +219,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		status := "deleted " + msg.id
 		isErr := msg.err != nil
 		if isErr {
-			status = "errore eliminazione " + msg.id + ": " + msg.err.Error()
+			status = "error deleting " + msg.id + ": " + msg.err.Error()
 		}
 		return m, rescanCmd(m.cfg.OutputDir, status, isErr)
 
@@ -306,7 +306,7 @@ func (m Model) updateKeyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "r":
 		m.statusMsg = ""
 		m.nameInput = textinput.New()
-		m.nameInput.Placeholder = "nome registrazione, invio per timestamp"
+		m.nameInput.Placeholder = "recording name, enter for timestamp"
 		m.mode = modeNameForm
 		return m, m.nameInput.Focus()
 	case "enter":
@@ -508,7 +508,7 @@ func (m Model) handleDownloadDone(msg downloadDoneMsg) (Model, tea.Cmd) {
 		return m, startTranscribeRunCmd(m.cfg, m.transcribeTarget)
 	case errors.Is(msg.err, context.Canceled):
 		m.mode = m.transcribeReturn
-		m.statusMsg = "download annullato"
+		m.statusMsg = "download canceled"
 		m.statusIsErr = false
 		return m, nil
 	default:
@@ -598,21 +598,21 @@ func (m Model) View() tea.View {
 	case modeRecording:
 		body = m.recordingView()
 	case modeRecError:
-		body = fmt.Sprintf("errore\n\n%v\n\npremi un tasto per tornare alla lista", m.recErr)
+		body = fmt.Sprintf("error\n\n%v\n\npress any key to return to list", m.recErr)
 	case modeNameForm:
 		body = m.nameFormView()
 	case modeDetail:
 		body = m.detailView()
 	case modeTranscribeMissingWhisper:
-		body = "whisper-cli non trovato.\n\nInstallalo con: brew install whisper-cpp"
+		body = "whisper-cli not found.\n\nInstall it with: brew install whisper-cpp"
 	case modeTranscribeDownloadConfirm:
-		body = fmt.Sprintf("modello %q mancante.\nScaricarlo ora da huggingface.co? [y/n]", m.cfg.WhisperModel)
+		body = fmt.Sprintf("model %q missing.\nDownload it now from huggingface.co? [y/n]", m.cfg.WhisperModel)
 	case modeDownloading:
 		body = m.downloadingView()
 	case modeTranscribing:
 		body = m.transcribingView()
 	case modeTranscribeError:
-		body = fmt.Sprintf("errore trascrizione\n\n%v", m.transcribeErr)
+		body = fmt.Sprintf("transcription error\n\n%v", m.transcribeErr)
 	default:
 		body = m.listView()
 	}
@@ -635,9 +635,9 @@ func (m Model) listView() string {
 	strip := ""
 	switch {
 	case m.confirmDelete:
-		strip = "eliminare la registrazione selezionata? [y/n]"
+		strip = "delete selected recording? [y/n]"
 	case m.confirmOverwrite:
-		strip = "già trascritto, sovrascrivere? [y/n]"
+		strip = "already transcribed, overwrite? [y/n]"
 	case m.statusMsg != "":
 		strip = m.renderStatus()
 	}
@@ -652,7 +652,7 @@ func (m Model) renderStatus() string {
 }
 
 func (m Model) nameFormView() string {
-	return "nome registrazione, invio per timestamp\n\n" + m.nameInput.View()
+	return "recording name, enter for timestamp\n\n" + m.nameInput.View()
 }
 
 func (m Model) detailView() string {
@@ -673,7 +673,7 @@ func (m Model) detailView() string {
 	lines := []string{
 		name,
 		r.Date.Format("2006-01-02 15:04"),
-		"durata: " + duration,
+		"duration: " + duration,
 		"size: " + records.FormatSize(r.SizeBytes),
 		"path: " + hyperlink(m.detailPath, m.detailPath),
 		"transcript: " + transcript,
@@ -684,9 +684,9 @@ func (m Model) detailView() string {
 
 	switch {
 	case m.confirmDelete:
-		lines = append(lines, "", "eliminare questa registrazione? [y/n]")
+		lines = append(lines, "", "delete this recording? [y/n]")
 	case m.confirmOverwrite:
-		lines = append(lines, "", "già trascritto, sovrascrivere? [y/n]")
+		lines = append(lines, "", "already transcribed, overwrite? [y/n]")
 	case len(m.detailPreview) > 0:
 		lines = append(lines, "", "--- transcript (preview) ---")
 		lines = append(lines, m.detailPreview...)
@@ -708,7 +708,7 @@ func (m Model) recordingView() string {
 		lines = append(lines, errStyle.Render("warning: "+m.recWarning))
 	}
 	if m.confirmingQuit {
-		lines = append(lines, "", "scartare la registrazione senza salvare? [y/n]")
+		lines = append(lines, "", "discard recording without saving? [y/n]")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -719,7 +719,7 @@ func (m Model) recordingView() string {
 func (m Model) levelLine() string {
 	var parts []string
 	if m.level.HasSystem {
-		parts = append(parts, "sistema "+renderLevelBar(m.level.System))
+		parts = append(parts, "system "+renderLevelBar(m.level.System))
 	}
 	if m.level.HasMic {
 		parts = append(parts, "mic "+renderLevelBar(m.level.Mic))
@@ -728,13 +728,13 @@ func (m Model) levelLine() string {
 }
 
 func (m Model) downloadingView() string {
-	return fmt.Sprintf("scaricamento modello %s...\n\n%s", m.cfg.WhisperModel, m.downloadProgress.ViewAs(m.downloadPct))
+	return fmt.Sprintf("downloading model %s...\n\n%s", m.cfg.WhisperModel, m.downloadProgress.ViewAs(m.downloadPct))
 }
 
 func (m Model) transcribingView() string {
 	elapsed := time.Since(m.transcribeStart)
 	lines := []string{
-		m.transcribeSpinner.View() + " trascrizione in corso... " + records.FormatDuration(elapsed.Seconds()),
+		m.transcribeSpinner.View() + " transcribing... " + records.FormatDuration(elapsed.Seconds()),
 		"",
 	}
 	lines = append(lines, m.transcribeLines...)
@@ -775,19 +775,19 @@ func appendCapped(lines []string, line string, max int) []string {
 func footerFor(mode screen) string {
 	switch mode {
 	case modeList:
-		return "r rec · invio dettaglio · t transcribe · o finder · d elimina · / filtra · q esci"
+		return "r rec · enter detail · t transcribe · o finder · d delete · / filter · q quit"
 	case modeDetail:
-		return "t transcribe · o finder · d elimina · esc lista"
+		return "t transcribe · o finder · d delete · esc list"
 	case modeRecording:
-		return "s stop · q annulla senza salvare"
+		return "s stop · q discard without saving"
 	case modeNameForm:
-		return "invio conferma · esc annulla"
+		return "enter confirm · esc cancel"
 	case modeDownloading:
-		return "esc annulla download"
+		return "esc cancel download"
 	case modeTranscribing:
-		return "trascrizione in corso…"
+		return "transcribing…"
 	case modeRecError, modeTranscribeMissingWhisper, modeTranscribeDownloadConfirm, modeTranscribeError:
-		return "premi un tasto per continuare"
+		return "press any key to continue"
 	default:
 		return ""
 	}
