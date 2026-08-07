@@ -603,3 +603,15 @@ func TestHyperlink(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowSizeReservesFooterAndStatus(t *testing.T) {
+	m := New(config.Config{}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	got := updated.(Model).list.Height()
+	h, v := appStyle.GetFrameSize()
+	_ = h
+	want := 24 - v - chromeLines
+	if got != want {
+		t.Errorf("list.Height() after WindowSizeMsg = %d, want %d (chrome reserved)", got, want)
+	}
+}

@@ -34,6 +34,11 @@ var errStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 var accentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 var footerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 
+// chromeLines is the vertical space the list screen always reserves outside
+// the list itself: status strip (2) + help footer (2). Keeping it fixed makes
+// the legend always visible and the layout stable when status text appears.
+const chromeLines = 4
+
 // item adapts a records.Record to list.DefaultItem.
 type item struct {
 	r records.Record
@@ -150,7 +155,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		h, v := appStyle.GetFrameSize()
-		m.list.SetSize(msg.Width-h, msg.Height-v)
+		m.list.SetSize(msg.Width-h, msg.Height-v-chromeLines)
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -624,20 +629,19 @@ func (m Model) View() tea.View {
 func (m Model) listView() string {
 	body := m.list.View()
 
-	var prefix []string
-	if m.statusMsg != "" {
-		prefix = append(prefix, m.renderStatus())
+	// Status strip: always exactly one line (possibly empty) + one blank,
+	// so the layout never jumps and the space reserved by chromeLines is
+	// used deterministically. Confirms take precedence over status text.
+	strip := ""
+	switch {
+	case m.confirmDelete:
+		strip = "eliminare la registrazione selezionata? [y/n]"
+	case m.confirmOverwrite:
+		strip = "già trascritto, sovrascrivere? [y/n]"
+	case m.statusMsg != "":
+		strip = m.renderStatus()
 	}
-	if m.confirmDelete {
-		prefix = append(prefix, "eliminare la registrazione selezionata? [y/n]")
-	}
-	if m.confirmOverwrite {
-		prefix = append(prefix, "già trascritto, sovrascrivere? [y/n]")
-	}
-	if len(prefix) == 0 {
-		return body
-	}
-	return strings.Join(prefix, "\n") + "\n\n" + body
+	return strip + "\n\n" + body
 }
 
 func (m Model) renderStatus() string {
