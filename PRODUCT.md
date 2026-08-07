@@ -31,7 +31,7 @@ L'unico registratore di call TUI: niente bot che entra in call (cattura via Core
 - Comandi: `nastro` (TUI), `record`, `records --plain`, `transcribe <id|last>`; ogni flusso TUI ha l'equivalente CLI headless
 - Architettura a due binari: `nastro` (Go) orchestran­te + `nastro-tap` (Swift) per la cattura; comunicazione via stdout (livelli `level sys=.. mic=..`) ed exit code (2 = permesso mancante)
 - Garanzie: scrittura incrementale (file valido anche dopo crash), metadata periodici (crash perde ≤5s di durata), lockfile con staleness detection, caffeinate anti-sleep, record <2s scartati
-- **Lingua UI: inglese, deciso** (2026-08-07). Debito noto: le stringhe TUI attuali sono in parte italiane e vanno unificate. L'italiano resta solo come lingua di default della trascrizione
+- **Lingua UI: inglese, deciso e applicato** (2026-08-07). L'italiano resta solo come lingua di default della trascrizione
 - Won't confermati: niente summarization AI/cloud, niente GUI (eccezione: indicatore ● NSStatusItem best-effort), niente auto-start su rilevamento meeting
 - Video: fase 2 dichiarata, non implementata
 
