@@ -3,6 +3,7 @@ package transcribe
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -491,5 +492,16 @@ func TestConvertToWavCancelReturnsContextCanceled(t *testing.T) {
 	cancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
 		t.Fatalf("ConvertToWav() = %v, want context.Canceled", err)
+	}
+}
+
+func TestFriendlyTranscribeErrorGatedRepo(t *testing.T) {
+	out := "huggingface_hub.errors.GatedRepoError: 403 Client Error.\nAccess to model pyannote/speaker-diarization-community-1 is restricted and you are not in the authorized list."
+	got := FriendlyTranscribeError(fmt.Errorf("exit status 1"), out)
+	if !strings.Contains(got, "accept the model terms") || !strings.Contains(got, "huggingface.co/pyannote/speaker-diarization-community-1") {
+		t.Errorf("FriendlyTranscribeError gated repo = %q, want guided accept-terms message", got)
+	}
+	if strings.Contains(got, "smaller model") {
+		t.Errorf("gated repo error must not suggest a smaller model, got %q", got)
 	}
 }

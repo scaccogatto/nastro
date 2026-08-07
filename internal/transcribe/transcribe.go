@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -120,6 +121,11 @@ func FriendlyTranscribeError(err error, output string) string {
 	}
 
 	detail := strings.TrimSpace(output)
+	if repo, ok := gatedRepo(detail); ok {
+		return fmt.Sprintf(
+			"transcription failed: your HuggingFace token works, but you haven't been granted access to the diarization model yet.\n"+
+				"Visit https://huggingface.co/%s while logged in and accept the model terms, then retry.", repo)
+	}
 	if mentionsMemoryOrModel(msg + " " + detail) {
 		return fmt.Sprintf("transcription failed (%s): try a smaller model in ~/.config/nastro/config.toml", msg)
 	}
@@ -128,6 +134,20 @@ func FriendlyTranscribeError(err error, output string) string {
 	}
 	return fmt.Sprintf("transcription failed: %s: %s", msg, detail)
 }
+
+// gatedRepo extracts the repo id from a huggingface GatedRepoError in
+// whisperx output, so the guidance can point at the exact terms page.
+func gatedRepo(output string) (string, bool) {
+	if !strings.Contains(output, "GatedRepoError") && !strings.Contains(output, "gated repo") {
+		return "", false
+	}
+	if m := gatedRepoID.FindStringSubmatch(output); m != nil {
+		return m[1], true
+	}
+	return "pyannote/speaker-diarization-community-1", true
+}
+
+var gatedRepoID = regexp.MustCompile(`Access to model ([\w./-]+) is restricted`)
 
 // --- everything below is side-effecting orchestration: subprocess exec,
 // network I/O, filesystem. Deliberately outside TDD scope, except for pure
