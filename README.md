@@ -6,6 +6,8 @@
 
 System audio + mic capture, local files, on-device diarized transcription.
 
+[![CI](https://github.com/scaccogatto/nastro/actions/workflows/ci.yml/badge.svg)](https://github.com/scaccogatto/nastro/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 <img src=".github/demo.gif" alt="nastro demo" width="800" />
 
 </div>
