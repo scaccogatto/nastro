@@ -1,6 +1,6 @@
 <div align="center">
 
-# nastro
+<img src=".github/logo.svg" alt="nastro" width="220" />
 
 **Record your calls from the terminal. No bots, no cloud.**
 
