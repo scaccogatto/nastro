@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/scaccogatto/nastro/internal/records"
+	"github.com/scaccogatto/nastro/internal/transcribe"
 )
 
 // recordDisplayName is how a record is named in the UI: its slug, falling
@@ -62,4 +63,14 @@ func formatDownloadPrompt(model string) string {
 		return fmt.Sprintf("model %s missing (%s). Download now? [y/n]", model, size)
 	}
 	return fmt.Sprintf("model %s missing. Download now? [y/n]", model)
+}
+
+// formatToolInstallPrompt formats the missing-tool install confirmation
+// (whisperx via uv, whisper-cli via brew), naming the tool, its installer,
+// and an optional size/time hint.
+func formatToolInstallPrompt(offer transcribe.InstallOffer) string {
+	if offer.SizeHint != "" {
+		return fmt.Sprintf("%s is not installed. Install it now with %s? (%s) [y/n]", offer.Tool, offer.Installer, offer.SizeHint)
+	}
+	return fmt.Sprintf("%s is not installed. Install it now with %s? [y/n]", offer.Tool, offer.Installer)
 }

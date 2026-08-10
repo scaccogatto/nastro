@@ -156,11 +156,17 @@ cat > "$outdir/$base.json" <<'JSON'
 JSON
 `
 
+// writeFakeWhisperX also stubs ffmpeg alongside whisperx (CheckPrereqs'
+// whisperx branch requires both) so tests using it don't depend on whether
+// the machine running them actually has ffmpeg installed.
 func writeFakeWhisperX(t *testing.T, script string) {
 	t.Helper()
 	scriptDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(scriptDir, "whisperx"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake whisperx: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scriptDir, "ffmpeg"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write fake ffmpeg: %v", err)
 	}
 	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
 }
@@ -305,12 +311,106 @@ func TestStartWhisperXExternalSIGKILLPreservesExistingTranscript(t *testing.T) {
 }
 
 func TestCheckPrereqsWhisperX(t *testing.T) {
-	// No whisperx on PATH at all (empty PATH).
-	t.Run("whisperx missing", func(t *testing.T) {
+	// Neither whisperx nor uv anywhere nastro looks: guided message.
+	t.Run("whisperx missing, uv missing", func(t *testing.T) {
 		t.Setenv("PATH", t.TempDir())
+		t.Setenv("HOME", t.TempDir())
+		withExtraToolDirs(t, nil)
 		status := CheckPrereqs(config.Config{Transcriber: "whisperx"})
-		if status.MissingMsg != WhisperXMissingMsg {
-			t.Errorf("MissingMsg = %q, want %q", status.MissingMsg, WhisperXMissingMsg)
+		if status.Install != nil {
+			t.Errorf("Install = %+v, want nil (no installer found)", status.Install)
+		}
+		want := WhisperXMissingMsg()
+		if status.MissingMsg != want {
+			t.Errorf("MissingMsg = %q, want %q", status.MissingMsg, want)
+		}
+	})
+
+	// whisperx missing, but uv is there: offer to install instead of a bare
+	// error message -- the P2 flow.
+	t.Run("whisperx missing, uv found", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		withExtraToolDirs(t, nil)
+		localBin := filepath.Join(home, ".local", "bin")
+		if err := os.MkdirAll(localBin, 0o755); err != nil {
+			t.Fatalf("mkdir ~/.local/bin: %v", err)
+		}
+		uvPath := filepath.Join(localBin, "uv")
+		if err := os.WriteFile(uvPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write fake uv: %v", err)
+		}
+
+		status := CheckPrereqs(config.Config{Transcriber: "whisperx"})
+		if status.MissingMsg != "" {
+			t.Errorf("MissingMsg = %q, want empty (uv found, install offer instead)", status.MissingMsg)
+		}
+		if status.Install == nil {
+			t.Fatalf("Install = nil, want an offer to install whisperx with uv")
+		}
+		if status.Install.Tool != "whisperx" || status.Install.Installer != "uv" || status.Install.InstallerPath != uvPath {
+			t.Errorf("Install = %+v, want Tool=whisperx Installer=uv InstallerPath=%q", status.Install, uvPath)
+		}
+		wantArgs := []string{"tool", "install", "whisperx"}
+		if strings.Join(status.Install.Args, " ") != strings.Join(wantArgs, " ") {
+			t.Errorf("Install.Args = %v, want %v", status.Install.Args, wantArgs)
+		}
+	})
+
+	// whisperx found, but ffmpeg (which whisperx itself shells out to) isn't
+	// -- brew is there, so nastro offers to install it, same as any other
+	// missing binary.
+	t.Run("whisperx present, ffmpeg missing, brew found", func(t *testing.T) {
+		scriptDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(scriptDir, "whisperx"), []byte(fakeWhisperXHangScript), 0o755); err != nil {
+			t.Fatalf("write fake whisperx: %v", err)
+		}
+		t.Setenv("PATH", scriptDir) // no real PATH leaking in: ffmpeg must be absent
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		withExtraToolDirs(t, nil)
+		localBin := filepath.Join(home, ".local", "bin")
+		if err := os.MkdirAll(localBin, 0o755); err != nil {
+			t.Fatalf("mkdir ~/.local/bin: %v", err)
+		}
+		brewPath := filepath.Join(localBin, "brew")
+		if err := os.WriteFile(brewPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write fake brew: %v", err)
+		}
+
+		status := CheckPrereqs(config.Config{Transcriber: "whisperx", HFToken: "hf_x"})
+		if status.MissingMsg != "" {
+			t.Errorf("MissingMsg = %q, want empty (brew found, install offer instead)", status.MissingMsg)
+		}
+		if status.Install == nil {
+			t.Fatalf("Install = nil, want an offer to install ffmpeg with brew")
+		}
+		if status.Install.Tool != "ffmpeg" || status.Install.Installer != "brew" || status.Install.InstallerPath != brewPath {
+			t.Errorf("Install = %+v, want Tool=ffmpeg Installer=brew InstallerPath=%q", status.Install, brewPath)
+		}
+		wantArgs := []string{"install", "ffmpeg"}
+		if strings.Join(status.Install.Args, " ") != strings.Join(wantArgs, " ") {
+			t.Errorf("Install.Args = %v, want %v", status.Install.Args, wantArgs)
+		}
+	})
+
+	t.Run("whisperx present, ffmpeg missing, brew missing", func(t *testing.T) {
+		scriptDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(scriptDir, "whisperx"), []byte(fakeWhisperXHangScript), 0o755); err != nil {
+			t.Fatalf("write fake whisperx: %v", err)
+		}
+		t.Setenv("PATH", scriptDir)
+		t.Setenv("HOME", t.TempDir())
+		withExtraToolDirs(t, nil)
+
+		status := CheckPrereqs(config.Config{Transcriber: "whisperx", HFToken: "hf_x"})
+		if status.Install != nil {
+			t.Errorf("Install = %+v, want nil (no brew found)", status.Install)
+		}
+		want := ffmpegMissingMsg()
+		if status.MissingMsg != want {
+			t.Errorf("MissingMsg = %q, want %q", status.MissingMsg, want)
 		}
 	})
 

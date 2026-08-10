@@ -153,10 +153,11 @@ var gatedRepoID = regexp.MustCompile(`Access to model ([\w./-]+) is restricted`)
 // network I/O, filesystem. Deliberately outside TDD scope, except for pure
 // helpers pulled out along the way (DownloadPercent), which are. ---
 
-// CheckWhisperCLI reports whether whisper-cli is on PATH.
+// CheckWhisperCLI reports whether whisper-cli can be found -- on PATH, or at
+// one of the well-known locations resolveTool falls back to.
 func CheckWhisperCLI() bool {
-	_, err := exec.LookPath("whisper-cli")
-	return err == nil
+	_, ok := resolveTool("whisper-cli")
+	return ok
 }
 
 // CheckModel reports whether the configured whisper model is already
@@ -166,17 +167,35 @@ func CheckModel(homeDir, model string) bool {
 	return err == nil
 }
 
-// whisperCLIMissingMsg is the guided error shown when whisper-cli isn't on
-// PATH -- shared by Run and the TUI's prereq check.
-const whisperCLIMissingMsg = "whisper-cli not found. Install it with: brew install whisper-cpp"
+// whisperCLIMissingMsg is the guided error shown when neither whisper-cli
+// nor an installer for it (brew) can be found -- shared by Run and the
+// TUI's prereq check.
+func whisperCLIMissingMsg() string {
+	return fmt.Sprintf("whisper-cli not found (looked in %s). Install it with: brew install whisper-cpp", searchedToolPaths("whisper-cli"))
+}
+
+// InstallOffer describes a missing backend binary nastro can offer to
+// install itself, via an installer it already found on the machine (uv for
+// whisperx, brew for whisper-cli). TUI and CLI each format their own
+// confirmation prompt from it (inline [y/n] vs. stdin [y/N]) and, on
+// confirmation, run it via StartToolInstall.
+type InstallOffer struct {
+	Tool          string   // binary being installed, e.g. "whisperx"
+	Installer     string   // display name of the installer, e.g. "uv"
+	InstallerPath string   // resolveTool's resolved path to Installer
+	Args          []string // args to run Installer with, e.g. ["tool", "install", "whisperx"]
+	SizeHint      string   // best-effort size/time hint for the confirm prompt, "" if none
+}
 
 // PrereqStatus reports whether cfg's configured backend is ready to
-// transcribe. MissingMsg is a guided, user-facing message for a hard
-// prerequisite that isn't fixable in-app (the backend binary itself, or
+// transcribe. Install is a missing binary nastro can offer to install
+// itself (see InstallOffer); MissingMsg is a guided, user-facing message for
+// a hard prerequisite that isn't fixable in-app (no installer found, or
 // whisperx's HF token). ModelMissing/ModelPath cover whisper-cli's local
-// ggml model, the one prerequisite the TUI can offer to download.
+// ggml model, the other prerequisite the TUI can offer to download.
 type PrereqStatus struct {
 	MissingMsg   string
+	Install      *InstallOffer
 	ModelMissing bool
 	ModelPath    string
 }
@@ -187,7 +206,22 @@ type PrereqStatus struct {
 func CheckPrereqs(cfg config.Config) PrereqStatus {
 	if cfg.Transcriber == "whisperx" {
 		if !CheckWhisperX() {
-			return PrereqStatus{MissingMsg: WhisperXMissingMsg}
+			if uvPath, ok := resolveTool("uv"); ok {
+				return PrereqStatus{Install: &InstallOffer{
+					Tool: "whisperx", Installer: "uv", InstallerPath: uvPath,
+					Args: []string{"tool", "install", "whisperx"}, SizeHint: "~2 GB, a few minutes",
+				}}
+			}
+			return PrereqStatus{MissingMsg: WhisperXMissingMsg()}
+		}
+		if !CheckFFmpeg() {
+			if brewPath, ok := resolveTool("brew"); ok {
+				return PrereqStatus{Install: &InstallOffer{
+					Tool: "ffmpeg", Installer: "brew", InstallerPath: brewPath,
+					Args: []string{"install", "ffmpeg"},
+				}}
+			}
+			return PrereqStatus{MissingMsg: ffmpegMissingMsg()}
 		}
 		if cfg.ResolvedHFToken() == "" {
 			return PrereqStatus{MissingMsg: MissingHFTokenMessage()}
@@ -196,11 +230,17 @@ func CheckPrereqs(cfg config.Config) PrereqStatus {
 	}
 
 	if !CheckWhisperCLI() {
-		return PrereqStatus{MissingMsg: whisperCLIMissingMsg}
+		if brewPath, ok := resolveTool("brew"); ok {
+			return PrereqStatus{Install: &InstallOffer{
+				Tool: "whisper-cli", Installer: "brew", InstallerPath: brewPath,
+				Args: []string{"install", "whisper-cpp"},
+			}}
+		}
+		return PrereqStatus{MissingMsg: whisperCLIMissingMsg()}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return PrereqStatus{MissingMsg: whisperCLIMissingMsg}
+		return PrereqStatus{MissingMsg: whisperCLIMissingMsg()}
 	}
 	if !CheckModel(home, cfg.WhisperModel) {
 		return PrereqStatus{ModelMissing: true, ModelPath: ModelPath(home, cfg.WhisperModel)}
@@ -261,8 +301,13 @@ func (j *Job) Wait() <-chan error { return j.waitErr }
 // whatever partial output it had written; a non-cancel failure does the
 // same.
 func StartWhisper(ctx context.Context, modelPath, lang, outPrefix, wavPath string) (*Job, error) {
+	whisperPath, ok := resolveTool("whisper-cli")
+	if !ok {
+		return nil, errors.New(whisperCLIMissingMsg())
+	}
+
 	partialPrefix := outPrefix + ".partial"
-	cmd := exec.CommandContext(ctx, "whisper-cli", "-m", modelPath, "-l", lang, "-otxt", "-osrt", "-of", partialPrefix, "-pp", "-f", wavPath)
+	cmd := exec.CommandContext(ctx, whisperPath, "-m", modelPath, "-l", lang, "-otxt", "-osrt", "-of", partialPrefix, "-pp", "-f", wavPath)
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw
@@ -300,6 +345,39 @@ func finalizeTranscript(partialPrefix, outPrefix string) error {
 		return err
 	}
 	return os.Rename(partialPrefix+".srt", outPrefix+".srt")
+}
+
+// StartToolInstall runs an installer command (e.g. `uv tool install
+// whisperx` or `brew install whisper-cpp`) in the background, streaming its
+// combined stdout/stderr line by line the same way StartWhisper does --
+// reused as-is by both the TUI's install-confirm flow and the CLI's stdin
+// one. Canceling ctx kills the installer; on cancel the tool is simply left
+// uninstalled (see the TUI's cancel handling for why no explicit "uv tool
+// uninstall" is needed).
+func StartToolInstall(ctx context.Context, installerPath string, args ...string) (*Job, error) {
+	cmd := exec.CommandContext(ctx, installerPath, args...)
+	cmd.Env = subprocessEnv()
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	cmd.Stderr = pw
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start %s: %w", filepath.Base(installerPath), err)
+	}
+
+	lines := make(chan string, 16)
+	waitErr := make(chan error, 1)
+	go streamLines(pr, lines)
+	go func() {
+		runErr := cmd.Wait()
+		pw.Close()
+		if ctx.Err() != nil {
+			runErr = context.Canceled
+		}
+		waitErr <- runErr
+	}()
+
+	return &Job{cmd: cmd, lines: lines, waitErr: waitErr}, nil
 }
 
 func streamLines(r io.Reader, out chan<- string) {
@@ -416,6 +494,37 @@ func runDownload(ctx context.Context, url, destPath string, progress chan<- Down
 	return os.Rename(partPath, destPath)
 }
 
+// installConfirmPrompt formats offer's stdin confirmation prompt for Run --
+// [y/N] (default no), matching the rest of Run's stdin-driven confirmations
+// (see the overwrite prompt below). The TUI builds its own inline [y/n]
+// wording instead (tui/confirm.go's formatToolInstallPrompt).
+func installConfirmPrompt(offer InstallOffer) string {
+	return fmt.Sprintf("%s is not installed. Install it now with %s? [y/N] ", offer.Tool, offer.Installer)
+}
+
+// confirmAndInstall asks the user (via stdin) whether to install offer's
+// tool, streaming the installer's output to stdout on confirmation the same
+// way Run streams the transcribe job's own output below. installed is false
+// (with a nil error) when the user declines -- Run then reports the tool as
+// still missing rather than pressing on.
+func confirmAndInstall(offer InstallOffer) (installed bool, err error) {
+	fmt.Print(installConfirmPrompt(offer))
+	reader := bufio.NewReader(os.Stdin)
+	answer, _ := reader.ReadString('\n')
+	if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+		return false, nil
+	}
+
+	job, err := StartToolInstall(context.Background(), offer.InstallerPath, offer.Args...)
+	if err != nil {
+		return true, err
+	}
+	for line := range job.Lines() {
+		fmt.Println(line)
+	}
+	return true, <-job.Wait()
+}
+
 // Run resolves idOrLast against cfg.OutputDir and transcribes it with
 // cfg.Transcriber's backend (whisperx by default, or whisper-cli),
 // converting the source audio to WAV via afconvert first. Its overwrite
@@ -433,6 +542,16 @@ func Run(cfg config.Config, idOrLast string) error {
 	}
 
 	status := CheckPrereqs(cfg)
+	if status.Install != nil {
+		installed, err := confirmAndInstall(*status.Install)
+		if err != nil {
+			return err
+		}
+		if !installed {
+			return fmt.Errorf("aborted: %s not installed", status.Install.Tool)
+		}
+		status = CheckPrereqs(cfg) // e.g. HF token (whisperx) or the ggml model (whisper-cli) may still be missing
+	}
 	if status.MissingMsg != "" {
 		return errors.New(status.MissingMsg)
 	}

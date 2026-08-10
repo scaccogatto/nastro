@@ -138,6 +138,17 @@ type Model struct {
 	downloadPct      float64
 	downloadProgress progress.Model
 
+	// tool-install flow (whisperx via uv, whisper-cli via brew), sharing
+	// modeTranscribeDownloadConfirm/modeDownloading with the model download
+	// above rather than adding dedicated screens: pendingInstall is set on
+	// the confirm screen, installJob once running (both nil for a plain
+	// model download).
+	pendingInstall *transcribe.InstallOffer
+	installJob     *transcribe.Job
+	installLines   []string
+	installStart   time.Time
+	installCancel  context.CancelFunc
+
 	// help overlay, entered from the list
 	helpViewport viewport.Model
 
@@ -279,6 +290,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case downloadDoneMsg:
 		return m.handleDownloadDone(msg)
 
+	case installStartedMsg:
+		return m.handleInstallStarted(msg)
+
+	case installLineMsg:
+		m.installLines = appendCapped(m.installLines, msg.line, 3)
+		return m, awaitInstallCmd(m.installJob)
+
+	case installDoneMsg:
+		return m.handleInstallDone(msg)
+
 	case transcribeStartedMsg:
 		return m.handleTranscribeStarted(msg)
 
@@ -296,7 +317,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleTranscribeDone(msg)
 
 	case spinner.TickMsg:
-		if m.mode != modeTranscribing {
+		installing := m.mode == modeDownloading && m.installJob != nil
+		if m.mode != modeTranscribing && !installing {
 			return m, nil
 		}
 		var cmd tea.Cmd
@@ -521,8 +543,17 @@ func (m Model) enterHelp() Model {
 
 func (m Model) updateKeyDownloadConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if !isConfirmYes(msg.String()) {
+		m.pendingInstall = nil
 		m.mode = m.transcribeReturn
 		return m, nil
+	}
+	if m.pendingInstall != nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		m.installCancel = cancel
+		m.installLines = nil
+		m.installStart = time.Now()
+		m.mode = modeDownloading
+		return m, tea.Batch(m.transcribeSpinner.Tick, startToolInstallCmd(ctx, *m.pendingInstall))
 	}
 	job := transcribe.StartModelDownload(transcribe.ModelDownloadURL(m.cfg.WhisperModel), m.pendingModelPath)
 	m.downloadJob = job
@@ -531,11 +562,25 @@ func (m Model) updateKeyDownloadConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 	return m, awaitDownloadCmd(job)
 }
 
+// updateKeyDownloading handles both modeDownloading's uses: a model
+// download (downloadJob) and a tool install (installCancel). Canceling a
+// tool install just kills the installer -- no explicit `uv tool uninstall`
+// or `brew uninstall` cleanup follows it. uv only registers a tool's shim
+// once its (isolated, per-tool) venv install has fully succeeded, and brew
+// only links a formula's files into its prefix on a successful `install`;
+// a killed mid-install leaves at most an unlinked/unregistered partial in
+// the installer's own cache, never a runnable-but-broken `whisperx`/
+// `whisper-cli` on the paths resolveTool looks at. The next prereq check
+// (or manual retry) simply sees the tool as still missing and offers the
+// install again.
 func (m Model) updateKeyDownloading(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "ctrl+c":
 		if m.downloadJob != nil {
 			m.downloadJob.Cancel()
+		}
+		if m.installCancel != nil {
+			m.installCancel()
 		}
 	}
 	return m, nil
@@ -674,12 +719,53 @@ func (m Model) handleTranscribePrereq(msg transcribePrereqMsg) (Model, tea.Cmd) 
 		m.transcribeMissingMsg = msg.missingMsg
 		m.mode = modeTranscribeMissingPrereq
 		return m, nil
+	case msg.install != nil:
+		m.pendingInstall = msg.install
+		m.mode = modeTranscribeDownloadConfirm
+		return m, nil
 	case msg.modelMissing:
 		m.pendingModelPath = msg.modelPath
 		m.mode = modeTranscribeDownloadConfirm
 		return m, nil
 	default:
 		return m.startTranscribingScreen(m.transcribeTarget)
+	}
+}
+
+// handleInstallStarted routes the tool-install subprocess's Start() outcome:
+// wired up (kick off its Lines()/Wait() heartbeat) or failed to even start.
+func (m Model) handleInstallStarted(msg installStartedMsg) (Model, tea.Cmd) {
+	if msg.err != nil {
+		m.installCancel = nil
+		m.pendingInstall = nil
+		m.transcribeErr = msg.err
+		m.mode = modeTranscribeError
+		return m, nil
+	}
+	m.installJob = msg.job
+	return m, awaitInstallCmd(m.installJob)
+}
+
+// handleInstallDone routes the installer's exit: on success, prereqs are
+// re-checked (whisperx may still need an HF token; whisper-cli may still
+// need its ggml model) rather than jumping straight to transcribing, so
+// nothing downstream gets skipped.
+func (m Model) handleInstallDone(msg installDoneMsg) (Model, tea.Cmd) {
+	m.installJob = nil
+	m.installCancel = nil
+	m.pendingInstall = nil
+	switch {
+	case msg.err == nil:
+		return m, checkTranscribePrereqsCmd(m.cfg)
+	case errors.Is(msg.err, context.Canceled):
+		m.mode = m.transcribeReturn
+		m.statusMsg = "install canceled"
+		m.statusIsErr = false
+		return m, nil
+	default:
+		m.transcribeErr = msg.err
+		m.mode = modeTranscribeError
+		return m, nil
 	}
 }
 
@@ -816,7 +902,11 @@ func (m Model) View() tea.View {
 	case modeTranscribeMissingPrereq:
 		body = bodyStyle(width).Render(m.transcribeMissingMsg)
 	case modeTranscribeDownloadConfirm:
-		body = bodyStyle(width).Render(formatDownloadPrompt(m.cfg.WhisperModel))
+		if m.pendingInstall != nil {
+			body = bodyStyle(width).Render(formatToolInstallPrompt(*m.pendingInstall))
+		} else {
+			body = bodyStyle(width).Render(formatDownloadPrompt(m.cfg.WhisperModel))
+		}
 	case modeDownloading:
 		body = m.downloadingView()
 	case modeTranscribing:
@@ -958,7 +1048,22 @@ func (m Model) levelLine() string {
 }
 
 func (m Model) downloadingView() string {
+	if m.installJob != nil {
+		return m.installView()
+	}
 	return fmt.Sprintf("downloading model %s for %s...\n\n%s", m.cfg.WhisperModel, recordDisplayName(m.transcribeTarget), m.downloadProgress.ViewAs(m.downloadPct))
+}
+
+// installView renders the tool-install screen: a spinner + elapsed time
+// (uv/brew give no reliable total-progress signal, same reasoning as
+// whisperx's own transcribingView) plus the installer's last few output
+// lines.
+func (m Model) installView() string {
+	elapsed := time.Since(m.installStart)
+	width := m.contentWidth()
+	headline := fmt.Sprintf("%s installing %s... %s", m.transcribeSpinner.View(), m.pendingInstall.Tool, records.FormatDuration(elapsed.Seconds()))
+	lines := append([]string{headline, ""}, wrapLines(m.installLines, width)...)
+	return strings.Join(lines, "\n")
 }
 
 func (m Model) transcribingView() string {
@@ -1107,11 +1212,11 @@ func footerFor(mode screen, compact bool) string {
 	case modeNameForm:
 		return "enter confirm · tab mode · esc/ctrl+c cancel"
 	case modeDownloading:
-		return "esc/ctrl+c cancel download"
+		return "esc/ctrl+c cancel"
 	case modeTranscribing:
 		return "esc cancel · ctrl+c cancel"
 	case modeTranscribeDownloadConfirm:
-		return "y download · any other key cancel"
+		return "y confirm · any other key cancel"
 	case modeRecError, modeTranscribeMissingPrereq, modeTranscribeError:
 		return "press any key to continue"
 	case modeHelp:

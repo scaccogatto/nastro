@@ -91,16 +91,32 @@ Backend selezionato da config (`transcriber`): **whisperx** (default, con
 speaker diarization) o **whisper-cli** (nessuna diarization, fallback).
 
 1. `nastro transcribe last` (o `t` dalla lista)
-2. Controllo prerequisiti del backend configurato:
-   - **whisperx**: binario `whisperx` sul PATH (altrimenti: "whisperx not
-     found. Install it with: uv tool install whisperx"); token HuggingFace
-     (`hf_token` in config, o `$HF_TOKEN` se il campo è vuoto) altrimenti
-     messaggio guidato con link per crearne uno, accettare i termini del
-     modello di diarization gated, e dove incollarlo nel TOML
-   - **whisper-cli**: binario `whisper-cli` sul PATH, poi modello ggml
-     assente → download con progress e size stimata (una tantum),
-     annullabile (whisperx gestisce i propri modelli da sé, nessun download
-     esplicito in nastro)
+2. Controllo prerequisiti del backend configurato. nastro è plug-and-play
+   sulle dipendenze: i binari (`whisperx`, `whisper-cli`, `uv`, `brew`) non
+   vengono cercati solo sul PATH del processo (spesso incompleto per un
+   terminale grafico) ma anche in `~/.local/bin` e nei bin di Homebrew
+   (`/opt/homebrew/bin`, `/usr/local/bin`).
+   - **whisperx**: binario `whisperx` non trovato ma `uv` sì → schermata di
+     conferma ("whisperx is not installed. Install it now with uv? (~2 GB,
+     a few minutes) [y/n]" in TUI, `[y/N]` da stdin in CLI); su conferma,
+     `uv tool install whisperx` in streaming (spinner + ultime righe),
+     annullabile (kill del processo; nessun cleanup esplicito serve, uv
+     registra lo shim del tool solo a install riuscita). A successo,
+     prosegue automaticamente con la ri-verifica dei prerequisiti e la
+     trascrizione. Se manca anche `uv` → messaggio guidato ("brew install
+     uv", poi "uv tool install whisperx"). Poi token HuggingFace (`hf_token`
+     in config, o `$HF_TOKEN` se il campo è vuoto) altrimenti messaggio
+     guidato con link per crearne uno, accettare i termini del modello di
+     diarization gated, e dove incollarlo nel TOML -- l'unico passo che resta
+     manuale (access-grant, non installabile)
+   - **whisper-cli**: binario `whisper-cli` non trovato ma `brew` sì →
+     stessa conferma/streaming con `brew install whisper-cpp`; se manca
+     anche `brew`, messaggio guidato attuale. Poi modello ggml assente →
+     download con progress e size stimata (una tantum), annullabile
+     (whisperx gestisce i propri modelli da sé, nessun download esplicito
+     in nastro)
+   Le installazioni partono solo su conferma esplicita dell'utente, mai in
+   automatico.
 3. Conversione audio (afconvert): spinner "preparing audio…", annullabile
 4. Backend in subprocess:
    - **whisper-cli** (con `--print-progress`): barra di progresso +

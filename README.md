@@ -24,4 +24,7 @@ nastro records              # lista registrazioni
 nastro transcribe last      # whisper.cpp, italiano di default
 ```
 
-Requisiti: macOS 14.4+ (CoreAudio process tap). Il permesso di registrazione viene chiesto al terminale ospite.
+## Requisiti
+
+- macOS 14.4+ (CoreAudio process tap). Il permesso di registrazione viene chiesto al terminale ospite.
+- Trascrizione, plug-and-play: nastro trova whisperx/whisper-cli anche fuori dal PATH (`~/.local/bin`, Homebrew) e, se mancano, si offre di installarli lui (`uv tool install whisperx` o `brew install whisper-cpp`, sempre dietro conferma esplicita). L'unico passo davvero manuale è un token HuggingFace per la diarization (`hf_token` in config o `$HF_TOKEN`): è un access-grant, non installabile da nastro.

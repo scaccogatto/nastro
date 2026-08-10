@@ -11,6 +11,7 @@ package transcribe
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,9 +21,15 @@ import (
 	"time"
 )
 
-// WhisperXMissingMsg is the guided error shown when the whisperx binary
-// isn't on PATH.
-const WhisperXMissingMsg = "whisperx not found. Install it with: uv tool install whisperx"
+// WhisperXMissingMsg is the guided error shown when neither whisperx nor its
+// installer (uv) can be found anywhere resolveTool looks -- the one
+// whisperx prerequisite that can't be offered as an in-app install (see
+// CheckPrereqs: when uv *is* found, an InstallOffer is returned instead).
+func WhisperXMissingMsg() string {
+	return fmt.Sprintf(
+		"whisperx not found (looked in %s).\ninstall uv first, then whisperx:\n  brew install uv\n  uv tool install whisperx",
+		searchedToolPaths("whisperx"))
+}
 
 // MissingHFTokenMessage is the guided, multi-line error shown when neither
 // cfg.HFToken nor $HF_TOKEN is set -- whisperx's --diarize needs a
@@ -41,10 +48,27 @@ func MissingHFTokenMessage() string {
 		"   hf_token = \"hf_...\""
 }
 
-// CheckWhisperX reports whether whisperx is on PATH.
+// CheckWhisperX reports whether whisperx can be found -- on PATH, or at one
+// of the well-known locations resolveTool falls back to.
 func CheckWhisperX() bool {
-	_, err := exec.LookPath("whisperx")
-	return err == nil
+	_, ok := resolveTool("whisperx")
+	return ok
+}
+
+// CheckFFmpeg reports whether ffmpeg can be found -- on PATH, or at one of
+// the well-known locations resolveTool falls back to. whisperx shells out
+// to it (via torchcodec/pyav) to load audio, so it's a whisperx prerequisite
+// too, not just something subprocessEnv papers over for a PATH that already
+// has it under a name resolveTool wouldn't find.
+func CheckFFmpeg() bool {
+	_, ok := resolveTool("ffmpeg")
+	return ok
+}
+
+// ffmpegMissingMsg is the guided error shown when neither ffmpeg nor an
+// installer for it (brew) can be found.
+func ffmpegMissingMsg() string {
+	return fmt.Sprintf("ffmpeg not found (looked in %s), required by whisperx to load audio. Install it with: brew install ffmpeg", searchedToolPaths("ffmpeg"))
 }
 
 // Segment is one diarized transcript segment, as parsed from whisperx's
@@ -175,12 +199,17 @@ func srtTimestamp(seconds float64) string {
 // exactly finalizeTranscript's two renames -- whisperx itself never writes
 // anywhere near outPrefix.
 func StartWhisperX(ctx context.Context, hfToken, lang, model, outPrefix, wavPath string) (*Job, error) {
+	whisperxPath, ok := resolveTool("whisperx")
+	if !ok {
+		return nil, errors.New(WhisperXMissingMsg())
+	}
+
 	tmpDir, err := os.MkdirTemp("", "nastro-whisperx-*")
 	if err != nil {
 		return nil, fmt.Errorf("create whisperx temp dir: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, "whisperx", wavPath,
+	cmd := exec.CommandContext(ctx, whisperxPath, wavPath,
 		"--diarize",
 		"--language", lang,
 		"--model", model,
@@ -190,6 +219,11 @@ func StartWhisperX(ctx context.Context, hfToken, lang, model, outPrefix, wavPath
 		"--output_dir", tmpDir,
 		"--output_format", "json",
 	)
+	// whisperx shells out to ffmpeg (via torchcodec/pyav) to load audio; a
+	// bare PATH -- common outside an interactive shell -- often can't find
+	// it even once whisperx itself is resolved. Same fallback as
+	// resolveTool, applied to the child's own PATH lookups.
+	cmd.Env = subprocessEnv()
 	pr, pw := io.Pipe()
 	cmd.Stdout = pw
 	cmd.Stderr = pw

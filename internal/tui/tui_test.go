@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/list"
+	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/scaccogatto/nastro/internal/config"
@@ -532,6 +533,202 @@ func TestHandleDownloadDoneError(t *testing.T) {
 	}
 	if nm.transcribeErr == nil {
 		t.Errorf("transcribeErr = nil, want the download error")
+	}
+}
+
+// --- P2: tool-install flow (whisperx via uv, whisper-cli via brew), sharing
+// modeTranscribeDownloadConfirm/modeDownloading with the model download
+// above. ---
+
+func TestHandleTranscribePrereqInstallOffered(t *testing.T) {
+	m := Model{mode: modeList, transcribeReturn: modeList}
+	offer := &transcribe.InstallOffer{Tool: "whisperx", Installer: "uv", InstallerPath: "/opt/homebrew/bin/uv", Args: []string{"tool", "install", "whisperx"}}
+
+	newModel, cmd := m.Update(transcribePrereqMsg{install: offer})
+	nm := newModel.(Model)
+	if nm.mode != modeTranscribeDownloadConfirm {
+		t.Errorf("mode = %v, want modeTranscribeDownloadConfirm", nm.mode)
+	}
+	if nm.pendingInstall != offer {
+		t.Errorf("pendingInstall = %+v, want %+v", nm.pendingInstall, offer)
+	}
+	if cmd != nil {
+		t.Errorf("cmd = %v, want nil", cmd)
+	}
+}
+
+func TestDownloadConfirmYWithPendingInstallStartsInstall(t *testing.T) {
+	offer := &transcribe.InstallOffer{Tool: "whisperx", Installer: "uv", InstallerPath: "/opt/homebrew/bin/uv", Args: []string{"tool", "install", "whisperx"}}
+	m := Model{mode: modeTranscribeDownloadConfirm, pendingInstall: offer, transcribeSpinner: spinner.New()}
+
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "y", Code: 'y'})
+	nm := newModel.(Model)
+	if nm.mode != modeDownloading {
+		t.Errorf("Update(y) mode = %v, want modeDownloading", nm.mode)
+	}
+	if nm.installCancel == nil {
+		t.Errorf("installCancel = nil, want a cancel func")
+	}
+	if cmd == nil {
+		t.Errorf("cmd = nil, want a batch of spinner tick + startToolInstallCmd")
+	}
+	nm.installCancel() // avoid leaking the context past the test
+}
+
+func TestDownloadConfirmNClearsPendingInstall(t *testing.T) {
+	offer := &transcribe.InstallOffer{Tool: "whisperx"}
+	m := Model{mode: modeTranscribeDownloadConfirm, pendingInstall: offer, transcribeReturn: modeDetail}
+
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "n", Code: 'n'})
+	nm := newModel.(Model)
+	if nm.mode != modeDetail {
+		t.Errorf("Update(n) mode = %v, want modeDetail (transcribeReturn)", nm.mode)
+	}
+	if nm.pendingInstall != nil {
+		t.Errorf("pendingInstall = %+v, want nil after declining", nm.pendingInstall)
+	}
+	if cmd != nil {
+		t.Errorf("Update(n) cmd = %v, want nil", cmd)
+	}
+}
+
+func TestHandleInstallStartedError(t *testing.T) {
+	m := Model{mode: modeDownloading, pendingInstall: &transcribe.InstallOffer{Tool: "whisperx"}}
+
+	newModel, cmd := m.Update(installStartedMsg{err: errors.New("exec: \"uv\": executable file not found")})
+	nm := newModel.(Model)
+	if nm.mode != modeTranscribeError {
+		t.Errorf("mode = %v, want modeTranscribeError", nm.mode)
+	}
+	if nm.pendingInstall != nil {
+		t.Errorf("pendingInstall = %+v, want nil after a start failure", nm.pendingInstall)
+	}
+	if cmd != nil {
+		t.Errorf("cmd = %v, want nil", cmd)
+	}
+}
+
+func TestHandleInstallStartedOK(t *testing.T) {
+	m := Model{mode: modeDownloading}
+
+	newModel, cmd := m.Update(installStartedMsg{job: nil})
+	if cmd == nil {
+		t.Errorf("cmd = nil, want awaitInstallCmd")
+	}
+	_ = newModel
+}
+
+func TestHandleInstallDoneSuccessReChecksPrereqs(t *testing.T) {
+	m := Model{
+		mode:           modeDownloading,
+		cfg:            config.Config{Transcriber: "whisperx"},
+		pendingInstall: &transcribe.InstallOffer{Tool: "whisperx"},
+	}
+
+	newModel, cmd := m.Update(installDoneMsg{err: nil})
+	nm := newModel.(Model)
+	if nm.installJob != nil {
+		t.Errorf("installJob = non-nil after done, want cleared")
+	}
+	if nm.pendingInstall != nil {
+		t.Errorf("pendingInstall = %+v, want cleared after a successful install", nm.pendingInstall)
+	}
+	if cmd == nil {
+		t.Fatalf("cmd = nil, want checkTranscribePrereqsCmd (re-check, e.g. HF token/model)")
+	}
+}
+
+func TestHandleInstallDoneCanceled(t *testing.T) {
+	m := Model{mode: modeDownloading, transcribeReturn: modeList, pendingInstall: &transcribe.InstallOffer{Tool: "whisperx"}}
+
+	newModel, cmd := m.Update(installDoneMsg{err: context.Canceled})
+	nm := newModel.(Model)
+	if nm.mode != modeList {
+		t.Errorf("mode = %v, want modeList (transcribeReturn)", nm.mode)
+	}
+	if nm.statusMsg != "install canceled" {
+		t.Errorf("statusMsg = %q, want %q", nm.statusMsg, "install canceled")
+	}
+	if nm.statusIsErr {
+		t.Errorf("statusIsErr = true, want false for a user cancel")
+	}
+	if nm.pendingInstall != nil {
+		t.Errorf("pendingInstall = %+v, want cleared", nm.pendingInstall)
+	}
+	if cmd != nil {
+		t.Errorf("cmd = %v, want nil", cmd)
+	}
+}
+
+func TestHandleInstallDoneError(t *testing.T) {
+	m := Model{mode: modeDownloading, pendingInstall: &transcribe.InstallOffer{Tool: "whisperx"}}
+
+	newModel, _ := m.Update(installDoneMsg{err: errors.New("exit status 1")})
+	nm := newModel.(Model)
+	if nm.mode != modeTranscribeError {
+		t.Errorf("mode = %v, want modeTranscribeError", nm.mode)
+	}
+	if nm.transcribeErr == nil {
+		t.Errorf("transcribeErr = nil, want the install error")
+	}
+}
+
+func TestInstallLineMsgCapsLines(t *testing.T) {
+	m := Model{mode: modeDownloading, installLines: []string{"a", "b", "c"}}
+
+	newModel, cmd := m.Update(installLineMsg{line: "d"})
+	nm := newModel.(Model)
+	want := []string{"b", "c", "d"}
+	if len(nm.installLines) != len(want) {
+		t.Fatalf("installLines = %+v, want %+v", nm.installLines, want)
+	}
+	for i := range want {
+		if nm.installLines[i] != want[i] {
+			t.Errorf("installLines[%d] = %q, want %q", i, nm.installLines[i], want[i])
+		}
+	}
+	if cmd == nil {
+		t.Errorf("cmd = nil, want awaitInstallCmd re-issued")
+	}
+}
+
+func TestUpdateKeyDownloadingCtrlCCancelsInstall(t *testing.T) {
+	canceled := false
+	m := Model{mode: modeDownloading, installCancel: func() { canceled = true }}
+
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c"})
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Errorf("Update(ctrl+c) in modeDownloading returned tea.Quit, want it to cancel the install instead")
+		}
+	}
+	if !canceled {
+		t.Errorf("Update(ctrl+c) in modeDownloading: installCancel not called")
+	}
+}
+
+// TestSpinnerTicksDuringInstall is the P2 regression for the spinner gate:
+// modeTranscribing isn't the only screen that animates the spinner anymore --
+// modeDownloading does too, while a tool install (not a model download) is
+// running.
+func TestSpinnerTicksDuringInstall(t *testing.T) {
+	m := Model{mode: modeDownloading, installJob: &transcribe.Job{}, transcribeSpinner: spinner.New()}
+
+	_, cmd := m.Update(spinner.TickMsg{})
+	if cmd == nil {
+		t.Errorf("spinner.TickMsg during install: cmd = nil, want the spinner's re-tick cmd")
+	}
+}
+
+// TestSpinnerIgnoredDuringPlainModelDownload guards the other side: a plain
+// model download (no installJob) still shows its own progress bar, not the
+// spinner -- ticking it would be silently wasted work.
+func TestSpinnerIgnoredDuringPlainModelDownload(t *testing.T) {
+	m := Model{mode: modeDownloading, transcribeSpinner: spinner.New()}
+
+	_, cmd := m.Update(spinner.TickMsg{})
+	if cmd != nil {
+		t.Errorf("spinner.TickMsg during plain model download: cmd = %v, want nil", cmd)
 	}
 }
 

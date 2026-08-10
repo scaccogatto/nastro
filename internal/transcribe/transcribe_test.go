@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/scaccogatto/nastro/internal/config"
 	"github.com/scaccogatto/nastro/internal/records"
 )
 
@@ -492,6 +493,141 @@ func TestConvertToWavCancelReturnsContextCanceled(t *testing.T) {
 	cancel()
 	if err := <-errCh; !errors.Is(err, context.Canceled) {
 		t.Fatalf("ConvertToWav() = %v, want context.Canceled", err)
+	}
+}
+
+func TestCheckPrereqsWhisperCLI(t *testing.T) {
+	t.Run("whisper-cli missing, brew missing", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		t.Setenv("HOME", t.TempDir())
+		withExtraToolDirs(t, nil)
+
+		status := CheckPrereqs(config.Config{Transcriber: "whisper-cli"})
+		if status.Install != nil {
+			t.Errorf("Install = %+v, want nil (no brew found)", status.Install)
+		}
+		want := whisperCLIMissingMsg()
+		if status.MissingMsg != want {
+			t.Errorf("MissingMsg = %q, want %q", status.MissingMsg, want)
+		}
+	})
+
+	t.Run("whisper-cli missing, brew found", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		withExtraToolDirs(t, nil)
+		localBin := filepath.Join(home, ".local", "bin")
+		if err := os.MkdirAll(localBin, 0o755); err != nil {
+			t.Fatalf("mkdir ~/.local/bin: %v", err)
+		}
+		brewPath := filepath.Join(localBin, "brew")
+		if err := os.WriteFile(brewPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write fake brew: %v", err)
+		}
+
+		status := CheckPrereqs(config.Config{Transcriber: "whisper-cli"})
+		if status.MissingMsg != "" {
+			t.Errorf("MissingMsg = %q, want empty (brew found, install offer instead)", status.MissingMsg)
+		}
+		if status.Install == nil {
+			t.Fatalf("Install = nil, want an offer to install whisper-cli with brew")
+		}
+		if status.Install.Tool != "whisper-cli" || status.Install.Installer != "brew" || status.Install.InstallerPath != brewPath {
+			t.Errorf("Install = %+v, want Tool=whisper-cli Installer=brew InstallerPath=%q", status.Install, brewPath)
+		}
+		wantArgs := []string{"install", "whisper-cpp"}
+		if strings.Join(status.Install.Args, " ") != strings.Join(wantArgs, " ") {
+			t.Errorf("Install.Args = %v, want %v", status.Install.Args, wantArgs)
+		}
+	})
+
+	t.Run("whisper-cli present, model missing", func(t *testing.T) {
+		scriptDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(scriptDir, "whisper-cli"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write fake whisper-cli: %v", err)
+		}
+		t.Setenv("PATH", scriptDir)
+		t.Setenv("HOME", t.TempDir()) // fresh, so ~/.cache/whisper/ggml-tiny.bin is guaranteed absent
+
+		status := CheckPrereqs(config.Config{Transcriber: "whisper-cli", WhisperModel: "tiny"})
+		if !status.ModelMissing {
+			t.Errorf("ModelMissing = false, want true")
+		}
+	})
+}
+
+// fakeInstallSuccessScript stands in for an installer (uv/brew) that
+// streams a couple of lines and exits 0.
+const fakeInstallSuccessScript = `#!/bin/sh
+echo "Resolved 1 package"
+echo "Installed whisperx"
+`
+
+func TestStartToolInstallSuccessStreamsOutput(t *testing.T) {
+	scriptDir := t.TempDir()
+	installerPath := filepath.Join(scriptDir, "uv")
+	if err := os.WriteFile(installerPath, []byte(fakeInstallSuccessScript), 0o755); err != nil {
+		t.Fatalf("write fake installer: %v", err)
+	}
+
+	job, err := StartToolInstall(context.Background(), installerPath, "tool", "install", "whisperx")
+	if err != nil {
+		t.Fatalf("StartToolInstall: %v", err)
+	}
+	var lines []string
+	for l := range job.Lines() {
+		lines = append(lines, l)
+	}
+	if err := <-job.Wait(); err != nil {
+		t.Fatalf("Wait(): %v", err)
+	}
+	if strings.Join(lines, "\n") != "Resolved 1 package\nInstalled whisperx" {
+		t.Errorf("streamed lines = %v, want the installer's two lines", lines)
+	}
+}
+
+func TestStartToolInstallFailureReportsExitError(t *testing.T) {
+	scriptDir := t.TempDir()
+	installerPath := filepath.Join(scriptDir, "uv")
+	script := "#!/bin/sh\necho some error 1>&2\nexit 1\n"
+	if err := os.WriteFile(installerPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake installer: %v", err)
+	}
+
+	job, err := StartToolInstall(context.Background(), installerPath, "tool", "install", "whisperx")
+	if err != nil {
+		t.Fatalf("StartToolInstall: %v", err)
+	}
+	for range job.Lines() {
+	}
+	if err := <-job.Wait(); err == nil {
+		t.Fatalf("Wait() = nil, want a non-nil error for exit 1")
+	}
+}
+
+func TestStartToolInstallCancelStopsProcess(t *testing.T) {
+	scriptDir := t.TempDir()
+	installerPath := filepath.Join(scriptDir, "uv")
+	if err := os.WriteFile(installerPath, []byte("#!/bin/sh\nexec sleep 5\n"), 0o755); err != nil {
+		t.Fatalf("write fake installer: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	job, err := StartToolInstall(ctx, installerPath, "tool", "install", "whisperx")
+	if err != nil {
+		t.Fatalf("StartToolInstall: %v", err)
+	}
+	go func() {
+		for range job.Lines() {
+		}
+	}()
+
+	time.Sleep(100 * time.Millisecond) // let the fake process actually start
+	cancel()
+
+	if err := <-job.Wait(); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Wait() = %v, want context.Canceled", err)
 	}
 }
 
