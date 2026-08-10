@@ -32,6 +32,13 @@ nastro transcribe last      # diarized transcript, on-device
 ## Quickstart
 
 ```sh
+brew install scaccogatto/tap/nastro
+nastro
+```
+
+Or from source:
+
+```sh
 git clone https://github.com/scaccogatto/nastro
 cd nastro && make build
 ./bin/nastro
