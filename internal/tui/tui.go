@@ -67,17 +67,6 @@ const (
 	modeHelp
 )
 
-// transcribePhase distinguishes the two visible stages of a transcribe run,
-// both shown on modeTranscribing: converting the source audio (afconvert),
-// before whisper-cli has produced any output, and whisper-cli actually
-// running.
-type transcribePhase int
-
-const (
-	transcribePreparing transcribePhase = iota
-	transcribeRunning
-)
-
 // Model is the bubbletea model for the nastro TUI: the records list, and
 // every screen reachable from it.
 type Model struct {
@@ -116,23 +105,40 @@ type Model struct {
 	// delete confirmation, shared by the list and detail screens
 	confirmDelete bool
 
-	// transcribe flow, triggered from the list or detail screen
-	transcribeTarget     records.Record
-	transcribeReturn     screen
-	confirmOverwrite     bool
-	pendingModelPath     string
-	transcribeMissingMsg string // guided message shown on modeTranscribeMissingPrereq
-	transcribeErr        error
-	transcribeStart      time.Time
-	transcribePhase      transcribePhase
-	transcribeSpinner    spinner.Model
-	transcribeLines      []string
-	transcribeJob        *transcribe.Job
-	transcribeTmpWav     string
-	transcribeCancel     context.CancelFunc
-	transcribeProgress   progress.Model
-	transcribePct        float64
-	transcribeHasPct     bool
+	// transcribe flow, triggered from the list or detail screen.
+	//
+	// transcribeJobs is the background job registry: one entry per record
+	// ID currently transcribing or queued to. transcribeQueue is the FIFO
+	// order queued jobs started in (transcribeJobs alone, a map, has none),
+	// so the next one to promote once a slot frees is unambiguous. Both are
+	// shared, mutated in place rather than reassigned, across every copy of
+	// Model bubbletea's Update loop produces -- see recordDelegate, which
+	// holds the same transcribeJobs map so the list's status column stays
+	// live without re-wiring the delegate on every change.
+	//
+	// Everything else here covers the flow *before* a job exists yet: the
+	// prereq check/tool-install/model-download screens are still a single,
+	// modal, one-at-a-time affair (see transcribePrereqMsg's doc comment),
+	// not part of the concurrent registry. transcribeTarget doubles as
+	// "the record that modal flow concerns" and "the job whose screen is
+	// currently focused" (modeTranscribing always shows
+	// transcribeJobs[transcribeTarget.ID]); transcribeReturn is copied into
+	// each job's own returnTo once it's admitted (see admitTranscribeJob),
+	// since different concurrent jobs can have been started from different
+	// screens.
+	transcribeJobs          map[string]*transcribeJobState
+	transcribeQueue         []string
+	transcribeTarget        records.Record
+	transcribeReturn        screen
+	confirmOverwrite        bool
+	confirmCancelTranscribe bool // "c" on the transcribing screen, y/n
+	confirmQuit             bool // q/ctrl+c on the list with jobs still running, y/n
+	pendingModelPath        string
+	transcribeMissingMsg    string // guided message shown on modeTranscribeMissingPrereq
+	transcribeErr           error
+	transcribeErrDetail     string // captured output alongside transcribeErr, for FriendlyTranscribeError
+	transcribeSpinner       spinner.Model
+	transcribeProgress      progress.Model
 
 	downloadJob      *transcribe.DownloadJob
 	downloadPct      float64
@@ -171,7 +177,12 @@ func New(cfg config.Config, recs []records.Record) Model {
 		items[i] = item{r: r}
 	}
 
-	l := list.New(items, recordDelegate{}, 0, 0)
+	// jobs is shared by reference with the delegate: since it's mutated in
+	// place (never reassigned) as jobs start/progress/finish, the delegate
+	// stays live without needing SetDelegate called again on every change.
+	jobs := map[string]*transcribeJobState{}
+
+	l := list.New(items, recordDelegate{jobs: jobs}, 0, 0)
 	l.Title = "nastro records"
 	l.SetShowHelp(false)
 	l.Styles = themedListStyles()
@@ -183,6 +194,7 @@ func New(cfg config.Config, recs []records.Record) Model {
 		list:               l,
 		cfg:                cfg,
 		homeDir:            home,
+		transcribeJobs:     jobs,
 		transcribeSpinner:  spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 		transcribeProgress: newProgress(),
 		downloadProgress:   newProgress(),
@@ -304,17 +316,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleTranscribeStarted(msg)
 
 	case transcribeLineMsg:
-		m.transcribePhase = transcribeRunning
-		if pct, ok := transcribe.ParseWhisperProgress(msg.line); ok {
-			m.transcribeHasPct = true
-			m.transcribePct = float64(pct) / 100
-		} else {
-			m.transcribeLines = appendCapped(m.transcribeLines, msg.line, 3)
-		}
-		return m, awaitTranscribeCmd(m.transcribeJob)
+		return m.handleTranscribeLine(msg)
 
 	case transcribeDoneMsg:
-		return m.handleTranscribeDone(msg)
+		return m.finishTranscribeJob(msg.id, msg.err)
 
 	case spinner.TickMsg:
 		installing := m.mode == modeDownloading && m.installJob != nil
@@ -379,6 +384,9 @@ func (m Model) updateKeyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.confirmOverwrite {
 		return m.handleOverwriteConfirmKey(msg)
 	}
+	if m.confirmQuit {
+		return m.handleQuitConfirmKey(msg)
+	}
 	if m.list.FilterState() == list.Filtering {
 		var cmd tea.Cmd
 		m.list, cmd = m.list.Update(msg)
@@ -387,6 +395,10 @@ func (m Model) updateKeyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "q", "ctrl+c":
+		if len(m.transcribeJobs) > 0 {
+			m.confirmQuit = true
+			return m, nil
+		}
 		return m, tea.Quit
 	case "r":
 		m.statusMsg = ""
@@ -401,6 +413,14 @@ func (m Model) updateKeyList(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		rec, ok := m.selectedRecord()
 		if !ok {
 			return m, nil
+		}
+		// A record with an active job opens its transcribing screen
+		// instead of the plain detail view -- same destination "t" would
+		// reach, without duplicating the job.
+		if _, active := m.transcribeJobs[rec.ID]; active {
+			m.transcribeTarget = rec
+			m.mode = modeTranscribing
+			return m, m.transcribeSpinner.Tick
 		}
 		m.detailRec = rec
 		m.detailPath, m.detailPreview = "", nil
@@ -586,17 +606,26 @@ func (m Model) updateKeyDownloading(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// updateKeyTranscribing handles the transcribing screen: esc and ctrl+c both
-// cancel the in-flight run (whichever subprocess is currently running --
-// afconvert or whisper-cli) rather than being swallowed or quitting the app.
-// The actual state transition happens once the canceled run reports back
-// (see handleTranscribeStarted/handleTranscribeDone), not here.
+// updateKeyTranscribing handles the transcribing screen: esc/ctrl+c both
+// just go back to the list, leaving the job running in the background --
+// canceling it is now a deliberate action ("c", with a y/n confirmation)
+// rather than an implicit side effect of navigating away.
 func (m Model) updateKeyTranscribing(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if m.confirmCancelTranscribe {
+		m.confirmCancelTranscribe = false
+		if isConfirmYes(msg.String()) {
+			return m.cancelTranscribeJob(m.transcribeTarget.ID)
+		}
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "esc", "ctrl+c":
-		if m.transcribeCancel != nil {
-			m.transcribeCancel()
-		}
+		m.mode = modeList
+		return m, nil
+	case "c":
+		m.confirmCancelTranscribe = true
+		return m, nil
 	}
 	return m, nil
 }
@@ -645,9 +674,17 @@ func (m Model) contentHeight() int {
 
 // startTranscribe kicks off the transcribe flow for rec, remembering
 // returnTo (the list or detail screen) as where to come back to once it's
-// done, one way or another. Already-transcribed records ask for an inline
-// overwrite confirmation first.
+// done, one way or another. A record that already has an active job just
+// focuses its screen -- "t" never duplicates a job. Already-transcribed
+// records (and no active job) ask for an inline overwrite confirmation
+// first.
 func (m Model) startTranscribe(rec records.Record, returnTo screen) (Model, tea.Cmd) {
+	if _, active := m.transcribeJobs[rec.ID]; active {
+		m.transcribeTarget = rec
+		m.mode = modeTranscribing
+		return m, m.transcribeSpinner.Tick
+	}
+
 	m.transcribeTarget = rec
 	m.transcribeReturn = returnTo
 	m.transcribeErr = nil
@@ -656,35 +693,7 @@ func (m Model) startTranscribe(rec records.Record, returnTo screen) (Model, tea.
 		m.confirmOverwrite = true
 		return m, nil
 	}
-	return m, checkTranscribePrereqsCmd(m.cfg)
-}
-
-// startTranscribingScreen enters modeTranscribing immediately (spinner
-// showing "preparing audio…") and kicks off the slower conversion +
-// whisper-cli run in the background, so there's no dead gap before any
-// feedback appears -- afconvert alone can take several seconds on a long
-// recording.
-func (m Model) startTranscribingScreen(rec records.Record) (Model, tea.Cmd) {
-	ctx, cancel := context.WithCancel(context.Background())
-	m.mode = modeTranscribing
-	m.transcribePhase = transcribePreparing
-	m.transcribeStart = time.Now()
-	m.transcribeLines = nil
-	m.transcribeJob = nil
-	m.transcribeCancel = cancel
-	m.transcribePct = 0
-	m.transcribeHasPct = false
-	return m, tea.Batch(m.transcribeSpinner.Tick, startTranscribeRunCmd(ctx, m.cfg, rec))
-}
-
-// cancelTranscribeCtx tears down the in-flight transcribe run's context.
-// Idempotent: safe to call once the run has already finished on its own.
-func (m Model) cancelTranscribeCtx() Model {
-	if m.transcribeCancel != nil {
-		m.transcribeCancel()
-		m.transcribeCancel = nil
-	}
-	return m
+	return m, checkTranscribePrereqsCmd(m.cfg, rec)
 }
 
 func (m Model) handleDeleteConfirmKey(msg tea.KeyPressMsg, rec records.Record) (Model, tea.Cmd) {
@@ -710,25 +719,45 @@ func (m Model) handleOverwriteConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
 	if !isConfirmYes(msg.String()) {
 		return m, nil
 	}
-	return m, checkTranscribePrereqsCmd(m.cfg)
+	return m, checkTranscribePrereqsCmd(m.cfg, m.transcribeTarget)
+}
+
+// handleQuitConfirmKey handles the list's "N transcriptions running, quit
+// anyway?" prompt: on yes, every job's context is explicitly canceled
+// (killing its subprocess) before quitting -- jobs die with the app, so
+// leaving that to process exit alone would risk orphaning them.
+func (m Model) handleQuitConfirmKey(msg tea.KeyPressMsg) (Model, tea.Cmd) {
+	m.confirmQuit = false
+	if !isConfirmYes(msg.String()) {
+		return m, nil
+	}
+	for _, st := range m.transcribeJobs {
+		if st.cancel != nil {
+			st.cancel()
+		}
+	}
+	return m, tea.Quit
 }
 
 func (m Model) handleTranscribePrereq(msg transcribePrereqMsg) (Model, tea.Cmd) {
 	switch {
 	case msg.missingMsg != "":
+		m.transcribeTarget = msg.rec
 		m.transcribeMissingMsg = msg.missingMsg
 		m.mode = modeTranscribeMissingPrereq
 		return m, nil
 	case msg.install != nil:
+		m.transcribeTarget = msg.rec
 		m.pendingInstall = msg.install
 		m.mode = modeTranscribeDownloadConfirm
 		return m, nil
 	case msg.modelMissing:
+		m.transcribeTarget = msg.rec
 		m.pendingModelPath = msg.modelPath
 		m.mode = modeTranscribeDownloadConfirm
 		return m, nil
 	default:
-		return m.startTranscribingScreen(m.transcribeTarget)
+		return m.admitTranscribeJob(msg.rec)
 	}
 }
 
@@ -756,7 +785,7 @@ func (m Model) handleInstallDone(msg installDoneMsg) (Model, tea.Cmd) {
 	m.pendingInstall = nil
 	switch {
 	case msg.err == nil:
-		return m, checkTranscribePrereqsCmd(m.cfg)
+		return m, checkTranscribePrereqsCmd(m.cfg, m.transcribeTarget)
 	case errors.Is(msg.err, context.Canceled):
 		m.mode = m.transcribeReturn
 		m.statusMsg = "install canceled"
@@ -773,7 +802,7 @@ func (m Model) handleDownloadDone(msg downloadDoneMsg) (Model, tea.Cmd) {
 	m.downloadJob = nil
 	switch {
 	case msg.err == nil:
-		return m.startTranscribingScreen(m.transcribeTarget)
+		return m.admitTranscribeJob(m.transcribeTarget)
 	case errors.Is(msg.err, context.Canceled):
 		m.mode = m.transcribeReturn
 		m.statusMsg = "download canceled"
@@ -786,61 +815,44 @@ func (m Model) handleDownloadDone(msg downloadDoneMsg) (Model, tea.Cmd) {
 	}
 }
 
+// handleTranscribeStarted routes id's job's Start() outcome: wired up (kick
+// off its Lines()/Wait() heartbeat) or failed to even start (including via
+// cancellation, before the backend ever ran) -- both funneled through
+// finishTranscribeJob, the single teardown/routing path every run outcome
+// shares.
 func (m Model) handleTranscribeStarted(msg transcribeStartedMsg) (Model, tea.Cmd) {
-	if errors.Is(msg.err, context.Canceled) {
-		m = m.cancelTranscribeCtx()
-		m.mode = m.transcribeReturn
-		m.statusMsg = "transcription canceled"
-		m.statusIsErr = false
-		if m.mode == modeList {
-			return m, rescanCmd(m.cfg.OutputDir, m.statusMsg, false)
-		}
-		return m, nil
-	}
 	if msg.err != nil {
-		m = m.cancelTranscribeCtx()
-		m.transcribeErr = msg.err
-		m.mode = modeTranscribeError
-		return m, nil
+		return m.finishTranscribeJob(msg.id, msg.err)
 	}
-	m.transcribeJob = msg.job
-	m.transcribeTmpWav = msg.tmpWavPath
-	return m, awaitTranscribeCmd(m.transcribeJob)
+	st, ok := m.transcribeJobs[msg.id]
+	if !ok {
+		return m, nil // stale: the job was canceled/removed before this arrived
+	}
+	st.job = msg.job
+	st.tmpWavPath = msg.tmpWavPath
+	return m, awaitTranscribeCmd(msg.id, st.job)
 }
 
-func (m Model) handleTranscribeDone(msg transcribeDoneMsg) (Model, tea.Cmd) {
-	m = m.cancelTranscribeCtx()
-	if m.transcribeTmpWav != "" {
-		os.Remove(m.transcribeTmpWav)
-		m.transcribeTmpWav = ""
+// handleTranscribeLine records one line of msg.id's job output: the raw
+// (unfiltered) tail for error detail, the filtered tail for display, and
+// any progress/phase hint the line carries.
+func (m Model) handleTranscribeLine(msg transcribeLineMsg) (Model, tea.Cmd) {
+	st, ok := m.transcribeJobs[msg.id]
+	if !ok {
+		return m, nil // stale: job already gone (canceled/done)
 	}
-	m.transcribeJob = nil
-
-	if errors.Is(msg.err, context.Canceled) {
-		m.mode = m.transcribeReturn
-		m.statusMsg = "transcription canceled"
-		m.statusIsErr = false
-		if m.mode == modeList {
-			return m, rescanCmd(m.cfg.OutputDir, m.statusMsg, false)
-		}
-		return m, nil
+	st.phase = jobRunning
+	st.rawLines = appendCapped(st.rawLines, msg.line, jobLineCap)
+	if pct, ok := transcribe.ParseWhisperProgress(msg.line); ok {
+		st.percent = pct
 	}
-	if msg.err != nil {
-		m.transcribeErr = msg.err
-		m.mode = modeTranscribeError
-		return m, nil
+	if label, ok := transcribe.WhisperXPhaseLabel(msg.line); ok {
+		st.phaseLabel = label
 	}
-
-	status := "transcribed " + m.transcribeTarget.ID
-	m.mode = m.transcribeReturn
-	m.statusMsg = status
-	m.statusIsErr = false
-
-	if m.mode == modeDetail {
-		m.detailRec.HasTranscript = true
-		return m, loadDetailCmd(m.detailRec, m.cfg.OutputDir)
+	if !transcribe.IsNoiseLine(msg.line) {
+		st.lines = appendCapped(st.lines, msg.line, jobLineCap)
 	}
-	return m, rescanCmd(m.cfg.OutputDir, status, false)
+	return m, awaitTranscribeCmd(msg.id, st.job)
 }
 
 func (m Model) handleTapExited(msg tapExitedMsg) (tea.Model, tea.Cmd) {
@@ -912,7 +924,7 @@ func (m Model) View() tea.View {
 	case modeTranscribing:
 		body = m.transcribingView()
 	case modeTranscribeError:
-		body = bodyStyle(width).Render("transcription error\n\n" + transcribe.FriendlyTranscribeError(m.transcribeErr, strings.Join(m.transcribeLines, "\n")))
+		body = bodyStyle(width).Render("transcription error\n\n" + transcribe.FriendlyTranscribeError(m.transcribeErr, m.transcribeErrDetail))
 	case modeHelp:
 		body = m.helpViewport.View()
 	default:
@@ -936,7 +948,10 @@ func (m Model) listView() string {
 
 	// Status strip: always exactly one line (possibly empty) + one blank,
 	// so the layout never jumps and the space reserved by chromeLines is
-	// used deterministically. Confirms take precedence over status text.
+	// used deterministically. Confirms take precedence over status text,
+	// which in turn takes precedence over the background jobs summary (a
+	// completion's "transcribed <id>" is more specific, and self-clears
+	// into the summary once a fresh one comes in).
 	strip := ""
 	width := m.contentWidth()
 	switch {
@@ -946,8 +961,14 @@ func (m Model) listView() string {
 		}
 	case m.confirmOverwrite:
 		strip = errStyle.Render(clampWidth(confirmOverwritePrompt(m.transcribeTarget), width))
+	case m.confirmQuit:
+		strip = errStyle.Render(clampWidth(confirmQuitPrompt(len(m.transcribeJobs)), width))
 	case m.statusMsg != "" || m.savedStatusDir != "":
 		strip = m.renderStatus()
+	default:
+		if summary := m.jobStatusSummary(); summary != "" {
+			strip = accentStyle.Render(clampWidth(summary, width))
+		}
 	}
 	return strip + "\n\n" + body
 }
@@ -1066,27 +1087,23 @@ func (m Model) installView() string {
 	return strings.Join(lines, "\n")
 }
 
+// transcribingView renders the currently focused job's screen: its record
+// name, phase headline (queued/preparing/running, progress bar once a
+// percentage is known -- see jobHeadline), its filtered output tail, and
+// (mid cancel confirmation) the y/n prompt.
 func (m Model) transcribingView() string {
-	elapsed := time.Since(m.transcribeStart)
+	st, ok := m.transcribeJobs[m.transcribeTarget.ID]
+	if !ok {
+		return "" // the job finished/was removed right as this rendered; next Update moves off this screen
+	}
 	width := m.contentWidth()
-	lines := []string{recordDisplayName(m.transcribeTarget), m.transcribeHeadline(elapsed), ""}
-	lines = append(lines, wrapLines(m.transcribeLines, width)...)
+	elapsed := time.Since(st.start)
+	lines := []string{recordDisplayName(m.transcribeTarget), m.jobHeadline(st, elapsed), ""}
+	lines = append(lines, wrapLines(st.lines, width)...)
+	if m.confirmCancelTranscribe {
+		lines = append(lines, "", errStyle.Render(clampWidth(confirmCancelTranscribePrompt(m.transcribeTarget), width)))
+	}
 	return strings.Join(lines, "\n")
-}
-
-// transcribeHeadline renders modeTranscribing's first line: whisper-cli's
-// own progress bar and percentage once --print-progress has reported in,
-// falling back to the spinner (older whisper-cli builds without the flag,
-// or simply before the first progress line has arrived).
-func (m Model) transcribeHeadline(elapsed time.Duration) string {
-	elapsedStr := records.FormatDuration(elapsed.Seconds())
-	if m.transcribePhase == transcribePreparing {
-		return m.transcribeSpinner.View() + " preparing audio... " + elapsedStr
-	}
-	if m.transcribeHasPct {
-		return fmt.Sprintf("%s  %s", m.transcribeProgress.ViewAs(m.transcribePct), elapsedStr)
-	}
-	return m.transcribeSpinner.View() + " transcribing... " + elapsedStr
 }
 
 // wrapLines word-wraps each of lines to width, for body text (like a
@@ -1140,7 +1157,7 @@ func appendCapped(lines []string, line string, max int) []string {
 // "quit" while it's actually cancelling the prompt.
 func (m Model) footer() string {
 	width := m.contentWidth()
-	if m.confirmDelete || m.confirmOverwrite || m.confirmingQuit {
+	if m.confirmDelete || m.confirmOverwrite || m.confirmingQuit || m.confirmCancelTranscribe || m.confirmQuit {
 		return clampWidth("y confirm · any other key cancel", width)
 	}
 	if m.mode == modeList {
@@ -1214,7 +1231,7 @@ func footerFor(mode screen, compact bool) string {
 	case modeDownloading:
 		return "esc/ctrl+c cancel"
 	case modeTranscribing:
-		return "esc cancel · ctrl+c cancel"
+		return "esc/ctrl+c list · c cancel"
 	case modeTranscribeDownloadConfirm:
 		return "y confirm · any other key cancel"
 	case modeRecError, modeTranscribeMissingPrereq, modeTranscribeError:

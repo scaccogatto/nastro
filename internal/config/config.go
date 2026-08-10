@@ -24,16 +24,31 @@ type Config struct {
 	// pyannote's gated diarization models. See ResolvedHFToken for the
 	// $HF_TOKEN environment fallback. Never logged.
 	HFToken string `toml:"hf_token"`
+	// MaxParallelTranscriptions caps how many transcribe jobs the TUI runs
+	// at once; beyond it, jobs queue (FIFO) until a slot frees. See
+	// ResolvedMaxParallel for the <1 floor.
+	MaxParallelTranscriptions int `toml:"max_parallel_transcriptions"`
 }
 
 // Default returns the built-in defaults, rooted at homeDir.
 func Default(homeDir string) Config {
 	return Config{
-		OutputDir:    filepath.Join(homeDir, "Recordings", "nastro"),
-		WhisperModel: "large-v3-turbo",
-		Lang:         "it",
-		Transcriber:  "whisperx",
+		OutputDir:                 filepath.Join(homeDir, "Recordings", "nastro"),
+		WhisperModel:              "large-v3-turbo",
+		Lang:                      "it",
+		Transcriber:               "whisperx",
+		MaxParallelTranscriptions: 2,
 	}
+}
+
+// ResolvedMaxParallel returns c.MaxParallelTranscriptions, floored at 1 --
+// a config value of 0 (unset in an older config.toml) or a negative one
+// would otherwise stall every transcription in the queue forever.
+func (c Config) ResolvedMaxParallel() int {
+	if c.MaxParallelTranscriptions < 1 {
+		return 1
+	}
+	return c.MaxParallelTranscriptions
 }
 
 // ResolvedHFToken returns c.HFToken, falling back to the $HF_TOKEN

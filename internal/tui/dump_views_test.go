@@ -58,6 +58,11 @@ func TestDumpViews(t *testing.T) {
 	render(t, "list EMPTY (first run)", New(cfg, nil), 100, 30)
 	render(t, "list narrow terminal", New(cfg, dumpRecs()), 60, 15)
 
+	lj := New(cfg, dumpRecs())
+	lj.transcribeJobs[dumpRecs()[1].ID] = &transcribeJobState{rec: dumpRecs()[1], phase: jobRunning, percent: 45}
+	lj.transcribeJobs[dumpRecs()[2].ID] = &transcribeJobState{rec: dumpRecs()[2], phase: jobQueued}
+	render(t, "list with background jobs (status column + strip)", lj, 100, 30)
+
 	render(t, "recording", dumpRecordingModel(cfg), 100, 30)
 	render(t, "recording narrow", dumpRecordingModel(cfg), 60, 15)
 
@@ -100,18 +105,29 @@ func TestDumpViews(t *testing.T) {
 	tr := New(cfg, dumpRecs())
 	tr.mode = modeTranscribing
 	tr.transcribeTarget = dumpRecs()[0]
-	tr.transcribePhase = transcribeRunning
-	tr.transcribeStart = time.Now().Add(-37 * time.Second)
-	tr.transcribeHasPct = true
-	tr.transcribePct = 0.45
+	tr.transcribeJobs[tr.transcribeTarget.ID] = &transcribeJobState{
+		rec: tr.transcribeTarget, phase: jobRunning, percent: 45,
+		start: time.Now().Add(-37 * time.Second),
+	}
 	render(t, "transcribing (progress bar)", tr, 100, 30)
 
 	trs := New(cfg, dumpRecs())
 	trs.mode = modeTranscribing
 	trs.transcribeTarget = dumpRecs()[1]
-	trs.transcribePhase = transcribePreparing
-	trs.transcribeStart = time.Now().Add(-3 * time.Second)
+	trs.transcribeJobs[trs.transcribeTarget.ID] = &transcribeJobState{
+		rec: trs.transcribeTarget, phase: jobConverting, percent: -1,
+		start: time.Now().Add(-3 * time.Second),
+	}
 	render(t, "transcribing (preparing audio, spinner fallback)", trs, 100, 30)
+
+	trq := New(cfg, dumpRecs())
+	trq.mode = modeTranscribing
+	trq.transcribeTarget = dumpRecs()[2]
+	trq.transcribeJobs[trq.transcribeTarget.ID] = &transcribeJobState{
+		rec: trq.transcribeTarget, phase: jobQueued, percent: -1,
+		start: time.Now(),
+	}
+	render(t, "transcribing (queued)", trq, 100, 30)
 
 	dw := New(cfg, dumpRecs())
 	dw.mode = modeDownloading

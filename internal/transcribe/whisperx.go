@@ -162,6 +162,31 @@ func formatDiarizedSrt(segs []Segment) string {
 	return b.String()
 }
 
+// whisperxPhaseMarkers maps a substring whisperx logs right before starting
+// each stage of its pipeline to the honest, human phase label the TUI shows
+// in place of a fabricated percentage (whisperx gives no reliable overall
+// progress). Checked in order; the first match wins.
+var whisperxPhaseMarkers = []struct {
+	marker string
+	label  string
+}{
+	{"Performing transcription", "transcribing…"},
+	{"Performing alignment", "aligning…"},
+	{"Performing diarization", "diarizing…"},
+}
+
+// WhisperXPhaseLabel reports the phase label whisperx's own line hints at
+// (see whisperxPhaseMarkers), ok=false if line isn't one of the known
+// stage-start markers.
+func WhisperXPhaseLabel(line string) (label string, ok bool) {
+	for _, m := range whisperxPhaseMarkers {
+		if strings.Contains(line, m.marker) {
+			return m.label, true
+		}
+	}
+	return "", false
+}
+
 // srtTimestamp formats seconds as SRT's HH:MM:SS,mmm timestamp.
 func srtTimestamp(seconds float64) string {
 	d := time.Duration(seconds * float64(time.Second))
@@ -225,10 +250,12 @@ func StartWhisperX(ctx context.Context, hfToken, lang, model, outPrefix, wavPath
 	// resolveTool, applied to the child's own PATH lookups.
 	cmd.Env = subprocessEnv()
 	pr, pw := io.Pipe()
-	cmd.Stdout = pw
-	cmd.Stderr = pw
+	logW, closeLog := openTranscribeLogWriter(outPrefix)
+	cmd.Stdout = io.MultiWriter(pw, logW)
+	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
+		closeLog()
 		os.RemoveAll(tmpDir)
 		return nil, fmt.Errorf("start whisperx: %w", err)
 	}
@@ -239,6 +266,7 @@ func StartWhisperX(ctx context.Context, hfToken, lang, model, outPrefix, wavPath
 	go func() {
 		runErr := cmd.Wait()
 		pw.Close()
+		closeLog()
 		if ctx.Err() != nil {
 			runErr = context.Canceled
 		}

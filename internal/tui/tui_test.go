@@ -379,6 +379,9 @@ func TestListTKeyOnFreshRecordChecksPrereqsDirectly(t *testing.T) {
 	if nm.confirmOverwrite {
 		t.Errorf("Update(t) on fresh record: confirmOverwrite = true, want false")
 	}
+	if nm.mode != modeList {
+		t.Errorf("Update(t) on fresh record: mode = %v, want modeList (until the prereq check replies)", nm.mode)
+	}
 	if cmd == nil {
 		t.Fatalf("Update(t) on fresh record returned nil cmd, want checkTranscribePrereqsCmd")
 	}
@@ -397,6 +400,48 @@ func TestListTKeyOnTranscribedRecordAsksOverwrite(t *testing.T) {
 	}
 }
 
+// TestListTKeyOnActiveJobFocusesItsScreenWithoutDuplicating: "t" on a
+// record that already has a running job just opens its screen -- it must
+// not start a second job, or even re-check prereqs.
+func TestListTKeyOnActiveJobFocusesItsScreenWithoutDuplicating(t *testing.T) {
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := New(config.Config{}, []records.Record{target})
+	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, phase: jobConverting}
+
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "t", Code: 't'})
+	nm := newModel.(Model)
+	if nm.mode != modeTranscribing {
+		t.Errorf("mode = %v, want modeTranscribing", nm.mode)
+	}
+	if nm.transcribeTarget.ID != target.ID {
+		t.Errorf("transcribeTarget.ID = %q, want %q", nm.transcribeTarget.ID, target.ID)
+	}
+	if len(nm.transcribeJobs) != 1 {
+		t.Errorf("transcribeJobs = %+v, want still exactly one entry (no duplicate)", nm.transcribeJobs)
+	}
+	if cmd == nil {
+		t.Errorf("cmd = nil, want the spinner tick (so the screen animates immediately)")
+	}
+}
+
+// TestListEnterOnActiveJobOpensTranscribingScreen covers "entering the
+// detail of a record being processed": enter must reach the job's screen,
+// not the plain detail view.
+func TestListEnterOnActiveJobOpensTranscribingScreen(t *testing.T) {
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := New(config.Config{}, []records.Record{target})
+	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, phase: jobRunning}
+
+	newModel, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	nm := newModel.(Model)
+	if nm.mode != modeTranscribing {
+		t.Errorf("Update(enter) on a record with an active job: mode = %v, want modeTranscribing", nm.mode)
+	}
+	if nm.transcribeTarget.ID != target.ID {
+		t.Errorf("transcribeTarget.ID = %q, want %q", nm.transcribeTarget.ID, target.ID)
+	}
+}
+
 func TestOverwriteConfirmNCancels(t *testing.T) {
 	m := Model{mode: modeList, confirmOverwrite: true}
 
@@ -410,7 +455,7 @@ func TestOverwriteConfirmNCancels(t *testing.T) {
 }
 
 func TestOverwriteConfirmYProceedsToPrereqCheck(t *testing.T) {
-	m := Model{mode: modeList, confirmOverwrite: true}
+	m := Model{mode: modeList, confirmOverwrite: true, transcribeTarget: records.Record{ID: "2026-08-06-1430-standup"}}
 
 	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "y", Code: 'y'})
 	if newModel.(Model).confirmOverwrite {
@@ -423,14 +468,18 @@ func TestOverwriteConfirmYProceedsToPrereqCheck(t *testing.T) {
 
 func TestHandleTranscribePrereqWhisperMissing(t *testing.T) {
 	m := Model{mode: modeList, transcribeReturn: modeList}
+	target := records.Record{ID: "2026-08-06-1430-standup"}
 
-	newModel, cmd := m.Update(transcribePrereqMsg{missingMsg: "whisper-cli not found"})
+	newModel, cmd := m.Update(transcribePrereqMsg{rec: target, missingMsg: "whisper-cli not found"})
 	nm := newModel.(Model)
 	if nm.mode != modeTranscribeMissingPrereq {
 		t.Errorf("mode = %v, want modeTranscribeMissingPrereq", nm.mode)
 	}
 	if nm.transcribeMissingMsg != "whisper-cli not found" {
 		t.Errorf("transcribeMissingMsg = %q, want %q", nm.transcribeMissingMsg, "whisper-cli not found")
+	}
+	if nm.transcribeTarget.ID != target.ID {
+		t.Errorf("transcribeTarget.ID = %q, want %q (from the message, not a stale Model field)", nm.transcribeTarget.ID, target.ID)
 	}
 	if cmd != nil {
 		t.Errorf("cmd = %v, want nil", cmd)
@@ -439,8 +488,9 @@ func TestHandleTranscribePrereqWhisperMissing(t *testing.T) {
 
 func TestHandleTranscribePrereqModelMissing(t *testing.T) {
 	m := Model{mode: modeList, transcribeReturn: modeList}
+	target := records.Record{ID: "2026-08-06-1430-standup"}
 
-	newModel, cmd := m.Update(transcribePrereqMsg{modelMissing: true, modelPath: "/some/model.bin"})
+	newModel, cmd := m.Update(transcribePrereqMsg{rec: target, modelMissing: true, modelPath: "/some/model.bin"})
 	nm := newModel.(Model)
 	if nm.mode != modeTranscribeDownloadConfirm {
 		t.Errorf("mode = %v, want modeTranscribeDownloadConfirm", nm.mode)
@@ -454,11 +504,23 @@ func TestHandleTranscribePrereqModelMissing(t *testing.T) {
 }
 
 func TestHandleTranscribePrereqAllPresentStartsRun(t *testing.T) {
-	m := Model{mode: modeList, transcribeReturn: modeList, cfg: config.Config{OutputDir: t.TempDir()}}
+	m := New(config.Config{OutputDir: t.TempDir()}, nil)
+	m.mode, m.transcribeReturn = modeList, modeList
+	target := records.Record{ID: "2026-08-06-1430-standup"}
 
-	_, cmd := m.Update(transcribePrereqMsg{})
+	newModel, cmd := m.Update(transcribePrereqMsg{rec: target})
+	nm := newModel.(Model)
+	if nm.mode != modeTranscribing {
+		t.Errorf("mode = %v, want modeTranscribing", nm.mode)
+	}
+	if _, ok := nm.transcribeJobs[target.ID]; !ok {
+		t.Errorf("transcribeJobs[%s] missing, want the job admitted", target.ID)
+	}
 	if cmd == nil {
-		t.Fatalf("cmd = nil, want startTranscribeRunCmd")
+		t.Fatalf("cmd = nil, want a batch of spinner tick + startTranscribeRunCmd")
+	}
+	if cancel := nm.transcribeJobs[target.ID].cancel; cancel != nil {
+		cancel()
 	}
 }
 
@@ -496,14 +558,23 @@ func TestDownloadConfirmYStartsDownload(t *testing.T) {
 }
 
 func TestHandleDownloadDoneSuccessStartsTranscribeRun(t *testing.T) {
-	m := Model{mode: modeDownloading, cfg: config.Config{OutputDir: t.TempDir()}}
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := New(config.Config{OutputDir: t.TempDir()}, nil)
+	m.mode, m.transcribeTarget = modeDownloading, target
 
 	newModel, cmd := m.Update(downloadDoneMsg{err: nil})
-	if newModel.(Model).downloadJob != nil {
+	nm := newModel.(Model)
+	if nm.downloadJob != nil {
 		t.Errorf("downloadJob = non-nil after done, want cleared")
+	}
+	if _, ok := nm.transcribeJobs[target.ID]; !ok {
+		t.Errorf("transcribeJobs[%s] missing, want the job admitted", target.ID)
 	}
 	if cmd == nil {
 		t.Fatalf("cmd = nil, want startTranscribeRunCmd")
+	}
+	if cancel := nm.transcribeJobs[target.ID].cancel; cancel != nil {
+		cancel()
 	}
 }
 
@@ -542,9 +613,10 @@ func TestHandleDownloadDoneError(t *testing.T) {
 
 func TestHandleTranscribePrereqInstallOffered(t *testing.T) {
 	m := Model{mode: modeList, transcribeReturn: modeList}
+	target := records.Record{ID: "2026-08-06-1430-standup"}
 	offer := &transcribe.InstallOffer{Tool: "whisperx", Installer: "uv", InstallerPath: "/opt/homebrew/bin/uv", Args: []string{"tool", "install", "whisperx"}}
 
-	newModel, cmd := m.Update(transcribePrereqMsg{install: offer})
+	newModel, cmd := m.Update(transcribePrereqMsg{rec: target, install: offer})
 	nm := newModel.(Model)
 	if nm.mode != modeTranscribeDownloadConfirm {
 		t.Errorf("mode = %v, want modeTranscribeDownloadConfirm", nm.mode)
@@ -732,108 +804,171 @@ func TestSpinnerIgnoredDuringPlainModelDownload(t *testing.T) {
 	}
 }
 
-func TestHandleTranscribeStartedError(t *testing.T) {
-	m := Model{}
+func TestHandleTranscribeStartedErrorFailsJob(t *testing.T) {
+	m := New(config.Config{OutputDir: t.TempDir()}, nil)
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, returnTo: modeList, phase: jobConverting}
+	m.mode, m.transcribeTarget = modeTranscribing, target
 
-	newModel, cmd := m.Update(transcribeStartedMsg{err: errors.New("afconvert failed")})
-	if newModel.(Model).mode != modeTranscribeError {
-		t.Errorf("mode = %v, want modeTranscribeError", newModel.(Model).mode)
+	newModel, cmd := m.Update(transcribeStartedMsg{id: target.ID, err: errors.New("afconvert failed")})
+	nm := newModel.(Model)
+	if nm.mode != modeTranscribeError {
+		t.Errorf("mode = %v, want modeTranscribeError", nm.mode)
+	}
+	if _, ok := nm.transcribeJobs[target.ID]; ok {
+		t.Errorf("failed job still in registry")
 	}
 	if cmd != nil {
 		t.Errorf("cmd = %v, want nil", cmd)
 	}
 }
 
-func TestHandleTranscribeStartedOKEntersTranscribing(t *testing.T) {
-	// mode is already modeTranscribing by the time transcribeStartedMsg
-	// arrives: startTranscribingScreen sets it eagerly (before ConvertToWav
-	// even runs) so the spinner shows "preparing audio…" with no dead gap.
-	m := Model{mode: modeTranscribing, transcribePhase: transcribePreparing}
+func TestHandleTranscribeStartedOKEntersRunningLoop(t *testing.T) {
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := New(config.Config{}, nil)
+	m.mode, m.transcribeTarget = modeTranscribing, target
+	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, phase: jobConverting}
 
-	newModel, cmd := m.Update(transcribeStartedMsg{tmpWavPath: "/tmp/x.wav"})
+	newModel, cmd := m.Update(transcribeStartedMsg{id: target.ID, tmpWavPath: "/tmp/x.wav"})
 	nm := newModel.(Model)
 	if nm.mode != modeTranscribing {
 		t.Errorf("mode = %v, want modeTranscribing", nm.mode)
 	}
-	if nm.transcribeTmpWav != "/tmp/x.wav" {
-		t.Errorf("transcribeTmpWav = %q, want %q", nm.transcribeTmpWav, "/tmp/x.wav")
+	if nm.transcribeJobs[target.ID].tmpWavPath != "/tmp/x.wav" {
+		t.Errorf("tmpWavPath = %q, want %q", nm.transcribeJobs[target.ID].tmpWavPath, "/tmp/x.wav")
 	}
 	if cmd == nil {
 		t.Errorf("cmd = nil, want awaitTranscribeCmd")
 	}
 }
 
-func TestStartTranscribingScreenEntersPreparingPhase(t *testing.T) {
-	m := Model{cfg: config.Config{OutputDir: t.TempDir()}}
-
-	nm, cmd := m.startTranscribingScreen(records.Record{ID: "2026-08-06-1430-standup"})
-	if nm.mode != modeTranscribing {
-		t.Errorf("mode = %v, want modeTranscribing", nm.mode)
-	}
-	if nm.transcribePhase != transcribePreparing {
-		t.Errorf("transcribePhase = %v, want transcribePreparing", nm.transcribePhase)
-	}
-	if nm.transcribeCancel == nil {
-		t.Errorf("transcribeCancel = nil, want a cancel func")
-	}
-	if cmd == nil {
-		t.Errorf("cmd = nil, want a batch of spinner tick + startTranscribeRunCmd")
-	}
-	nm.transcribeCancel() // avoid leaking the context past the test
-}
-
-func TestUpdateKeyTranscribingEscCancels(t *testing.T) {
+// TestUpdateKeyTranscribingEscReturnsToListWithoutCanceling is the core
+// "free navigation" behavior: esc must leave the job running.
+func TestUpdateKeyTranscribingEscReturnsToListWithoutCanceling(t *testing.T) {
+	target := records.Record{ID: "2026-08-06-1430-standup"}
 	canceled := false
-	m := Model{mode: modeTranscribing, transcribeCancel: func() { canceled = true }}
+	m := Model{
+		mode:             modeTranscribing,
+		transcribeTarget: target,
+		transcribeJobs:   map[string]*transcribeJobState{target.ID: {rec: target, phase: jobRunning, cancel: func() { canceled = true }}},
+	}
 
-	_, cmd := m.Update(tea.KeyPressMsg{Text: "esc"})
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "esc"})
 	if cmd != nil {
 		t.Errorf("Update(esc) in transcribing cmd = %v, want nil", cmd)
 	}
-	if !canceled {
-		t.Errorf("Update(esc) in transcribing: transcribeCancel not called")
+	if canceled {
+		t.Errorf("Update(esc) in transcribing: job was canceled, want it left running")
+	}
+	nm := newModel.(Model)
+	if nm.mode != modeList {
+		t.Errorf("mode = %v, want modeList", nm.mode)
+	}
+	if _, ok := nm.transcribeJobs[target.ID]; !ok {
+		t.Errorf("job removed from registry by esc, want it still running")
 	}
 }
 
-func TestUpdateKeyTranscribingCtrlCCancelsInsteadOfQuitting(t *testing.T) {
+// TestUpdateKeyTranscribingCtrlCAlsoReturnsWithoutCanceling: ctrl+c is
+// treated the same as esc here (the "safe" key), matching how ctrl+c
+// behaves on the recording screen (stop & save, never destructive).
+func TestUpdateKeyTranscribingCtrlCAlsoReturnsWithoutCanceling(t *testing.T) {
+	target := records.Record{ID: "2026-08-06-1430-standup"}
 	canceled := false
-	m := Model{mode: modeTranscribing, transcribeCancel: func() { canceled = true }}
+	m := Model{
+		mode:             modeTranscribing,
+		transcribeTarget: target,
+		transcribeJobs:   map[string]*transcribeJobState{target.ID: {rec: target, phase: jobRunning, cancel: func() { canceled = true }}},
+	}
 
 	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c"})
 	if cmd != nil {
 		if _, ok := cmd().(tea.QuitMsg); ok {
-			t.Errorf("Update(ctrl+c) in transcribing returned tea.Quit, want it to cancel instead")
+			t.Errorf("Update(ctrl+c) in transcribing returned tea.Quit")
 		}
 	}
+	if canceled {
+		t.Errorf("Update(ctrl+c) in transcribing: job was canceled, want it left running")
+	}
+	if newModel.(Model).mode != modeList {
+		t.Errorf("mode = %v, want modeList", newModel.(Model).mode)
+	}
+}
+
+// TestUpdateKeyTranscribingCKeyAsksCancelConfirmation covers cancellation's
+// new home: "c" on the job's own screen, with a y/n prompt.
+func TestUpdateKeyTranscribingCKeyAsksCancelConfirmation(t *testing.T) {
+	m := Model{mode: modeTranscribing}
+
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "c", Code: 'c'})
+	if !newModel.(Model).confirmCancelTranscribe {
+		t.Errorf("Update(c) in transcribing: confirmCancelTranscribe = false, want true")
+	}
+	if cmd != nil {
+		t.Errorf("Update(c) cmd = %v, want nil (just asks confirmation)", cmd)
+	}
+}
+
+func TestUpdateKeyTranscribingCancelConfirmYCancelsTheFocusedJob(t *testing.T) {
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	canceled := false
+	m := Model{
+		mode:                    modeTranscribing,
+		confirmCancelTranscribe: true,
+		transcribeTarget:        target,
+		transcribeJobs:          map[string]*transcribeJobState{target.ID: {rec: target, phase: jobRunning, cancel: func() { canceled = true }}},
+	}
+
+	newModel, _ := m.Update(tea.KeyPressMsg{Text: "y", Code: 'y'})
 	if !canceled {
-		t.Errorf("Update(ctrl+c) in transcribing: transcribeCancel not called")
+		t.Errorf("Update(y) confirming cancel: job's cancel func not called")
+	}
+	if newModel.(Model).confirmCancelTranscribe {
+		t.Errorf("confirmCancelTranscribe still true after confirming")
+	}
+}
+
+func TestUpdateKeyTranscribingCancelConfirmNKeepsRunning(t *testing.T) {
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	canceled := false
+	m := Model{
+		mode:                    modeTranscribing,
+		confirmCancelTranscribe: true,
+		transcribeTarget:        target,
+		transcribeJobs:          map[string]*transcribeJobState{target.ID: {rec: target, phase: jobRunning, cancel: func() { canceled = true }}},
+	}
+
+	newModel, _ := m.Update(tea.KeyPressMsg{Text: "n", Code: 'n'})
+	if canceled {
+		t.Errorf("Update(n) declining cancel: job's cancel func was called")
+	}
+	if newModel.(Model).confirmCancelTranscribe {
+		t.Errorf("confirmCancelTranscribe still true after declining")
 	}
 	if newModel.(Model).mode != modeTranscribing {
-		t.Errorf("Update(ctrl+c) in transcribing: mode = %v, want modeTranscribing (unchanged until the job reports back)", newModel.(Model).mode)
+		t.Errorf("mode = %v, want modeTranscribing (still on the job's screen)", newModel.(Model).mode)
 	}
 }
 
 func TestHandleTranscribeDoneCanceledReturnsToListWithRescan(t *testing.T) {
-	m := Model{
-		mode:             modeTranscribing,
-		cfg:              config.Config{OutputDir: t.TempDir()},
-		transcribeReturn: modeList,
-		transcribeCancel: func() {},
-	}
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := New(config.Config{OutputDir: t.TempDir()}, nil)
+	m.mode, m.transcribeTarget = modeTranscribing, target
+	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, returnTo: modeList, phase: jobRunning, cancel: func() {}}
 
-	newModel, cmd := m.Update(transcribeDoneMsg{err: context.Canceled})
+	newModel, cmd := m.Update(transcribeDoneMsg{id: target.ID, err: context.Canceled})
 	nm := newModel.(Model)
 	if nm.mode != modeList {
-		t.Errorf("mode = %v, want modeList (transcribeReturn)", nm.mode)
+		t.Errorf("mode = %v, want modeList (returnTo)", nm.mode)
 	}
-	if nm.statusMsg != "transcription canceled" {
-		t.Errorf("statusMsg = %q, want %q", nm.statusMsg, "transcription canceled")
+	if nm.statusMsg != "transcription canceled: "+target.ID {
+		t.Errorf("statusMsg = %q, want %q", nm.statusMsg, "transcription canceled: "+target.ID)
 	}
 	if nm.statusIsErr {
 		t.Errorf("statusIsErr = true, want false for a user cancel")
 	}
-	if nm.transcribeCancel != nil {
-		t.Errorf("transcribeCancel not cleared after done")
+	if _, ok := nm.transcribeJobs[target.ID]; ok {
+		t.Errorf("canceled job still in registry")
 	}
 	// H4: canceling back to the list must rescan, so a stale ✓ (or its
 	// absence) doesn't linger.
@@ -844,50 +979,36 @@ func TestHandleTranscribeDoneCanceledReturnsToListWithRescan(t *testing.T) {
 	if !ok {
 		t.Fatalf("cmd() = %T, want recordsReloadedMsg", cmd())
 	}
-	if msg.status != "transcription canceled" {
-		t.Errorf("recordsReloadedMsg.status = %q, want %q", msg.status, "transcription canceled")
+	if msg.status != nm.statusMsg {
+		t.Errorf("recordsReloadedMsg.status = %q, want %q", msg.status, nm.statusMsg)
 	}
 }
 
 func TestHandleTranscribeStartedCanceledDuringPreparing(t *testing.T) {
-	m := Model{mode: modeTranscribing, transcribeReturn: modeDetail, transcribeCancel: func() {}}
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := Model{mode: modeTranscribing, transcribeTarget: target}
+	m.transcribeJobs = map[string]*transcribeJobState{target.ID: {rec: target, returnTo: modeDetail, phase: jobConverting, cancel: func() {}}}
 
-	newModel, cmd := m.Update(transcribeStartedMsg{err: context.Canceled})
+	newModel, cmd := m.Update(transcribeStartedMsg{id: target.ID, err: context.Canceled})
 	nm := newModel.(Model)
 	if nm.mode != modeDetail {
-		t.Errorf("mode = %v, want modeDetail (transcribeReturn)", nm.mode)
+		t.Errorf("mode = %v, want modeDetail (returnTo)", nm.mode)
 	}
-	if nm.statusMsg != "transcription canceled" {
-		t.Errorf("statusMsg = %q, want %q", nm.statusMsg, "transcription canceled")
+	if nm.statusMsg != "transcription canceled: "+target.ID {
+		t.Errorf("statusMsg = %q, want %q", nm.statusMsg, "transcription canceled: "+target.ID)
 	}
-	if cmd != nil {
-		t.Errorf("cmd = %v, want nil", cmd)
-	}
-}
-
-func TestHandleTranscribeStartedCanceledReturnsToListWithRescan(t *testing.T) {
-	m := Model{
-		mode:             modeTranscribing,
-		cfg:              config.Config{OutputDir: t.TempDir()},
-		transcribeReturn: modeList,
-		transcribeCancel: func() {},
-	}
-
-	newModel, cmd := m.Update(transcribeStartedMsg{err: context.Canceled})
-	nm := newModel.(Model)
-	if nm.mode != modeList {
-		t.Errorf("mode = %v, want modeList (transcribeReturn)", nm.mode)
-	}
-	// H4: canceling back to the list must rescan.
 	if cmd == nil {
 		t.Fatalf("cmd = nil, want rescanCmd")
 	}
 }
 
 func TestHandleTranscribeDoneErrorShowsErrorScreen(t *testing.T) {
-	m := Model{mode: modeTranscribing}
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := New(config.Config{OutputDir: t.TempDir()}, nil)
+	m.mode, m.transcribeTarget = modeTranscribing, target
+	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, returnTo: modeList, phase: jobRunning, cancel: func() {}}
 
-	newModel, cmd := m.Update(transcribeDoneMsg{err: errors.New("whisper-cli exploded")})
+	newModel, cmd := m.Update(transcribeDoneMsg{id: target.ID, err: errors.New("whisper-cli exploded")})
 	nm := newModel.(Model)
 	if nm.mode != modeTranscribeError {
 		t.Errorf("mode = %v, want modeTranscribeError", nm.mode)
@@ -901,14 +1022,12 @@ func TestHandleTranscribeDoneErrorShowsErrorScreen(t *testing.T) {
 }
 
 func TestHandleTranscribeDoneSuccessReturnsToList(t *testing.T) {
-	m := Model{
-		mode:             modeTranscribing,
-		cfg:              config.Config{OutputDir: t.TempDir()},
-		transcribeReturn: modeList,
-		transcribeTarget: records.Record{ID: "2026-08-06-1430-standup"},
-	}
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := New(config.Config{OutputDir: t.TempDir()}, nil)
+	m.mode, m.transcribeTarget = modeTranscribing, target
+	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, returnTo: modeList, phase: jobRunning, cancel: func() {}}
 
-	newModel, cmd := m.Update(transcribeDoneMsg{})
+	newModel, cmd := m.Update(transcribeDoneMsg{id: target.ID})
 	nm := newModel.(Model)
 	if nm.mode != modeList {
 		t.Errorf("mode = %v, want modeList", nm.mode)
@@ -925,15 +1044,13 @@ func TestHandleTranscribeDoneSuccessReturnsToList(t *testing.T) {
 }
 
 func TestHandleTranscribeDoneSuccessReturnsToDetailRefreshesFlag(t *testing.T) {
-	m := Model{
-		mode:             modeTranscribing,
-		cfg:              config.Config{OutputDir: t.TempDir()},
-		transcribeReturn: modeDetail,
-		transcribeTarget: records.Record{ID: "2026-08-06-1430-standup"},
-		detailRec:        records.Record{ID: "2026-08-06-1430-standup", HasTranscript: false},
-	}
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := New(config.Config{OutputDir: t.TempDir()}, nil)
+	m.mode, m.transcribeTarget = modeTranscribing, target
+	m.detailRec = records.Record{ID: target.ID, HasTranscript: false}
+	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, returnTo: modeDetail, phase: jobRunning, cancel: func() {}}
 
-	newModel, cmd := m.Update(transcribeDoneMsg{})
+	newModel, cmd := m.Update(transcribeDoneMsg{id: target.ID})
 	nm := newModel.(Model)
 	if nm.mode != modeDetail {
 		t.Errorf("mode = %v, want modeDetail", nm.mode)
@@ -946,22 +1063,100 @@ func TestHandleTranscribeDoneSuccessReturnsToDetailRefreshesFlag(t *testing.T) {
 	}
 }
 
-func TestTranscribeLineMsgCapsLines(t *testing.T) {
-	m := Model{mode: modeTranscribing, transcribeLines: []string{"a", "b", "c"}}
+// TestTranscribeLineMsgFiltersDisplayKeepsRawForErrors covers isNoiseLine's
+// display-only contract: a noisy line (the pyannote warning) is dropped
+// from the on-screen tail but still kept in the raw buffer
+// FriendlyTranscribeError eventually sees.
+func TestTranscribeLineMsgFiltersDisplayKeepsRawForErrors(t *testing.T) {
+	target := records.Record{ID: "2026-08-06-1430-standup"}
+	m := New(config.Config{}, nil)
+	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, phase: jobConverting}
 
-	newModel, cmd := m.Update(transcribeLineMsg{line: "d"})
-	nm := newModel.(Model)
-	want := []string{"b", "c", "d"}
-	if len(nm.transcribeLines) != len(want) {
-		t.Fatalf("transcribeLines = %+v, want %+v", nm.transcribeLines, want)
+	m2, cmd := m.Update(transcribeLineMsg{id: target.ID, line: "Performing diarization..."})
+	nm := m2.(Model)
+	m3, _ := nm.Update(transcribeLineMsg{id: target.ID, line: "  std = sequences.std(dim=-1, correction=1)"})
+	nm = m3.(Model)
+
+	st := nm.transcribeJobs[target.ID]
+	if len(st.lines) != 1 || st.lines[0] != "Performing diarization..." {
+		t.Errorf("st.lines = %+v, want only the useful info line (noise filtered)", st.lines)
 	}
-	for i := range want {
-		if nm.transcribeLines[i] != want[i] {
-			t.Errorf("transcribeLines[%d] = %q, want %q", i, nm.transcribeLines[i], want[i])
-		}
+	if len(st.rawLines) != 2 {
+		t.Errorf("st.rawLines = %+v, want both lines kept (unfiltered, for error detail)", st.rawLines)
+	}
+	if st.phase != jobRunning {
+		t.Errorf("phase = %v, want jobRunning (a line arrived)", st.phase)
 	}
 	if cmd == nil {
 		t.Errorf("cmd = nil, want awaitTranscribeCmd re-issued")
+	}
+}
+
+// --- Quit-with-active-jobs confirmation (list screen). ---
+
+func TestQuitWithActiveJobsAsksConfirmation(t *testing.T) {
+	m := New(config.Config{}, nil)
+	m.transcribeJobs["a"] = &transcribeJobState{rec: rec("a"), phase: jobRunning}
+
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "q", Code: 'q'})
+	nm := newModel.(Model)
+	if !nm.confirmQuit {
+		t.Errorf("Update(q) with active jobs: confirmQuit = false, want true")
+	}
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Errorf("Update(q) with active jobs quit immediately, want a confirmation first")
+		}
+	}
+}
+
+func TestQuitWithNoActiveJobsQuitsImmediately(t *testing.T) {
+	m := New(config.Config{}, nil)
+
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "q", Code: 'q'})
+	if cmd == nil {
+		t.Fatalf("Update(q) with no jobs returned nil cmd, want tea.Quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("Update(q) with no jobs cmd() = %T, want tea.QuitMsg", cmd())
+	}
+}
+
+func TestQuitConfirmYCancelsAllJobsAndQuits(t *testing.T) {
+	m := New(config.Config{}, nil)
+	aCanceled, bCanceled := false, false
+	m.transcribeJobs["a"] = &transcribeJobState{rec: rec("a"), phase: jobRunning, cancel: func() { aCanceled = true }}
+	m.transcribeJobs["b"] = &transcribeJobState{rec: rec("b"), phase: jobQueued}
+	m.confirmQuit = true
+
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "y", Code: 'y'})
+	_ = bCanceled
+	if !aCanceled {
+		t.Errorf("running job's cancel func not called on confirmed quit")
+	}
+	if cmd == nil {
+		t.Fatalf("cmd = nil, want tea.Quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Errorf("cmd() = %T, want tea.QuitMsg", cmd())
+	}
+}
+
+func TestQuitConfirmNKeepsRunning(t *testing.T) {
+	m := New(config.Config{}, nil)
+	canceled := false
+	m.transcribeJobs["a"] = &transcribeJobState{rec: rec("a"), phase: jobRunning, cancel: func() { canceled = true }}
+	m.confirmQuit = true
+
+	newModel, cmd := m.Update(tea.KeyPressMsg{Text: "n", Code: 'n'})
+	if canceled {
+		t.Errorf("job canceled despite declining quit")
+	}
+	if cmd != nil {
+		t.Errorf("cmd = %v, want nil", cmd)
+	}
+	if newModel.(Model).confirmQuit {
+		t.Errorf("confirmQuit still true after declining")
 	}
 }
 

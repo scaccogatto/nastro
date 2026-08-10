@@ -10,10 +10,11 @@ func TestDefault(t *testing.T) {
 	got := Default("/home/user")
 
 	want := Config{
-		OutputDir:    filepath.Join("/home/user", "Recordings", "nastro"),
-		WhisperModel: "large-v3-turbo",
-		Lang:         "it",
-		Transcriber:  "whisperx",
+		OutputDir:                 filepath.Join("/home/user", "Recordings", "nastro"),
+		WhisperModel:              "large-v3-turbo",
+		Lang:                      "it",
+		Transcriber:               "whisperx",
+		MaxParallelTranscriptions: 2,
 	}
 	if got != want {
 		t.Errorf("Default(%q) = %+v, want %+v", "/home/user", got, want)
@@ -45,10 +46,11 @@ func TestLoadFrom(t *testing.T) {
 			toml:    `lang = "en"`,
 			homeDir: "/home/user",
 			want: Config{
-				OutputDir:    filepath.Join("/home/user", "Recordings", "nastro"),
-				WhisperModel: "large-v3-turbo",
-				Lang:         "en",
-				Transcriber:  "whisperx",
+				OutputDir:                 filepath.Join("/home/user", "Recordings", "nastro"),
+				WhisperModel:              "large-v3-turbo",
+				Lang:                      "en",
+				Transcriber:               "whisperx",
+				MaxParallelTranscriptions: 2,
 			},
 		},
 		{
@@ -59,14 +61,16 @@ whisper_model = "small"
 lang = "fr"
 transcriber = "whisper-cli"
 hf_token = "hf_secret"
+max_parallel_transcriptions = 4
 `,
 			homeDir: "/home/user",
 			want: Config{
-				OutputDir:    "/custom/dir",
-				WhisperModel: "small",
-				Lang:         "fr",
-				Transcriber:  "whisper-cli",
-				HFToken:      "hf_secret",
+				OutputDir:                 "/custom/dir",
+				WhisperModel:              "small",
+				Lang:                      "fr",
+				Transcriber:               "whisper-cli",
+				HFToken:                   "hf_secret",
+				MaxParallelTranscriptions: 4,
 			},
 		},
 		{
@@ -126,6 +130,26 @@ func TestResolvedHFToken(t *testing.T) {
 			cfg := Config{HFToken: tt.cfgToken}
 			if got := cfg.ResolvedHFToken(); got != tt.wantToken {
 				t.Errorf("ResolvedHFToken() = %q, want %q", got, tt.wantToken)
+			}
+		})
+	}
+}
+
+func TestResolvedMaxParallel(t *testing.T) {
+	tests := []struct {
+		name string
+		val  int
+		want int
+	}{
+		{"configured value", 4, 4},
+		{"zero floors to 1", 0, 1},
+		{"negative floors to 1", -3, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{MaxParallelTranscriptions: tt.val}
+			if got := cfg.ResolvedMaxParallel(); got != tt.want {
+				t.Errorf("ResolvedMaxParallel() = %d, want %d", got, tt.want)
 			}
 		})
 	}

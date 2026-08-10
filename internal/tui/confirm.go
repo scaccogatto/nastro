@@ -37,6 +37,23 @@ func confirmDiscardPrompt() string {
 	return "discard this recording? [y/n]"
 }
 
+// confirmCancelTranscribePrompt formats the transcribing screen's cancel
+// confirmation ("c"), naming the record.
+func confirmCancelTranscribePrompt(r records.Record) string {
+	return fmt.Sprintf("cancel transcription of %s? [y/n]", recordDisplayName(r))
+}
+
+// confirmQuitPrompt formats the list's quit-with-active-jobs confirmation:
+// n is len(transcribeJobs), running and queued combined -- jobs die with
+// the app, so the prompt says so rather than leaving it a surprise.
+func confirmQuitPrompt(n int) string {
+	plural := "s"
+	if n == 1 {
+		plural = ""
+	}
+	return fmt.Sprintf("%d transcription%s running, quit anyway? they will be canceled [y/n]", n, plural)
+}
+
 // isConfirmYes reports whether key confirms a [y/n] prompt: only "y"/"Y"
 // count as yes, anything else (including no key at all) cancels.
 func isConfirmYes(key string) bool {

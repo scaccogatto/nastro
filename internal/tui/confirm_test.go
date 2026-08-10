@@ -58,6 +58,29 @@ func TestConfirmOverwritePrompt(t *testing.T) {
 	}
 }
 
+func TestConfirmCancelTranscribePrompt(t *testing.T) {
+	r := records.Record{ID: "2026-08-06-1430", Slug: "cliente-eppi"}
+	want := "cancel transcription of cliente-eppi? [y/n]"
+	if got := confirmCancelTranscribePrompt(r); got != want {
+		t.Errorf("confirmCancelTranscribePrompt(%+v) = %q, want %q", r, got, want)
+	}
+}
+
+func TestConfirmQuitPrompt(t *testing.T) {
+	tests := []struct {
+		n    int
+		want string
+	}{
+		{1, "1 transcription running, quit anyway? they will be canceled [y/n]"},
+		{2, "2 transcriptions running, quit anyway? they will be canceled [y/n]"},
+	}
+	for _, tt := range tests {
+		if got := confirmQuitPrompt(tt.n); got != tt.want {
+			t.Errorf("confirmQuitPrompt(%d) = %q, want %q", tt.n, got, tt.want)
+		}
+	}
+}
+
 func TestIsConfirmYes(t *testing.T) {
 	tests := []struct {
 		key  string

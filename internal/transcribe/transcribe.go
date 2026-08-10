@@ -149,6 +149,47 @@ func gatedRepo(output string) (string, bool) {
 
 var gatedRepoID = regexp.MustCompile(`Access to model ([\w./-]+) is restricted`)
 
+// tqdmProgressLine matches a tqdm-style progress bar line (e.g. "45%|####  |
+// 12/27 [00:03<00:04, 3.21it/s]"), the kind of repeated, carriage-return-
+// driven noise third-party libraries (torch, pyannote) emit -- useful once,
+// as a live bar, meaningless as a scrollback line.
+var tqdmProgressLine = regexp.MustCompile(`\d+%\|.*\|.*(it/s|s/it)`)
+
+// IsNoiseLine reports whether line is display noise to drop from the TUI's
+// on-screen tail of backend output: blank lines, Python's warnings.warn()
+// output (both the "<file>:<line>: FooWarning: ..." line and the indented
+// source line it prints beneath itself -- the well-known pyannote
+// std()-degrees-of-freedom warning being the recurring example), internal
+// (non-error) traceback frames, and repeated third-party progress bars.
+// Everything else -- including useful INFO lines like "Performing
+// diarization..." -- passes through. Display-only: the full, unfiltered
+// output still goes to transcribe.log and to FriendlyTranscribeError on
+// failure.
+func IsNoiseLine(line string) bool {
+	if strings.TrimSpace(line) == "" {
+		return true
+	}
+	// A line indented with leading whitespace is a continuation of the
+	// previous one (a warning's source snippet, a traceback frame's code
+	// line) rather than a standalone message.
+	if line[0] == ' ' || line[0] == '\t' {
+		return true
+	}
+
+	trimmed := strings.TrimSpace(line)
+	switch {
+	case strings.Contains(trimmed, "Warning:"):
+		return true
+	case strings.HasPrefix(trimmed, "Traceback (most recent call last)"):
+		return true
+	case strings.HasPrefix(trimmed, `File "`) && strings.Contains(trimmed, "line "):
+		return true
+	case tqdmProgressLine.MatchString(trimmed):
+		return true
+	}
+	return false
+}
+
 // --- everything below is side-effecting orchestration: subprocess exec,
 // network I/O, filesystem. Deliberately outside TDD scope, except for pure
 // helpers pulled out along the way (DownloadPercent), which are. ---
@@ -309,10 +350,12 @@ func StartWhisper(ctx context.Context, modelPath, lang, outPrefix, wavPath strin
 	partialPrefix := outPrefix + ".partial"
 	cmd := exec.CommandContext(ctx, whisperPath, "-m", modelPath, "-l", lang, "-otxt", "-osrt", "-of", partialPrefix, "-pp", "-f", wavPath)
 	pr, pw := io.Pipe()
-	cmd.Stdout = pw
-	cmd.Stderr = pw
+	logW, closeLog := openTranscribeLogWriter(outPrefix)
+	cmd.Stdout = io.MultiWriter(pw, logW)
+	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
+		closeLog()
 		return nil, fmt.Errorf("start whisper-cli: %w", err)
 	}
 
@@ -322,6 +365,7 @@ func StartWhisper(ctx context.Context, modelPath, lang, outPrefix, wavPath strin
 	go func() {
 		runErr := cmd.Wait()
 		pw.Close()
+		closeLog()
 		if ctx.Err() != nil {
 			runErr = context.Canceled
 		}
@@ -378,6 +422,27 @@ func StartToolInstall(ctx context.Context, installerPath string, args ...string)
 	}()
 
 	return &Job{cmd: cmd, lines: lines, waitErr: waitErr}, nil
+}
+
+// transcribeLogPath returns the crash-safe append log a backend run's full
+// output is written to, alongside outPrefix (e.g. "<record
+// dir>/transcript") -- so it lands at "<record dir>/transcribe.log". It
+// isn't part of HasTranscript/the transcript itself, just raw evidence of
+// what the backend printed.
+func transcribeLogPath(outPrefix string) string {
+	return filepath.Join(filepath.Dir(outPrefix), "transcribe.log")
+}
+
+// openTranscribeLogWriter opens outPrefix's transcribe.log for appending,
+// returning it as an io.Writer alongside a close func. Best-effort: on any
+// error opening it (e.g. the record dir vanished), returns io.Discard and a
+// no-op close rather than failing the whole transcribe run over a log file.
+func openTranscribeLogWriter(outPrefix string) (io.Writer, func()) {
+	f, err := os.OpenFile(transcribeLogPath(outPrefix), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return io.Discard, func() {}
+	}
+	return f, func() { f.Close() }
 }
 
 func streamLines(r io.Reader, out chan<- string) {

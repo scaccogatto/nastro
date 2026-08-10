@@ -23,7 +23,7 @@ var helpSections = []helpSection{
 	{"recording", []string{"s stop & save", "q stop & save", "x discard", "ctrl+c stop & save"}},
 	{"name form", []string{"enter confirm", "tab mode", "esc/ctrl+c cancel"}},
 	{"downloading model", []string{"esc cancel download", "ctrl+c cancel download"}},
-	{"transcribing", []string{"esc cancel", "ctrl+c cancel"}},
+	{"transcribing", []string{"esc/ctrl+c back to list (job keeps running)", "c cancel"}},
 	{"download confirm", []string{"y download", "q/any other key cancel"}},
 	{"message screens (missing prereqs, errors)", []string{"any key continue"}},
 }

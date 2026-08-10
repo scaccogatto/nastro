@@ -136,6 +136,26 @@ func TestSrtTimestamp(t *testing.T) {
 	}
 }
 
+func TestWhisperXPhaseLabel(t *testing.T) {
+	tests := []struct {
+		line      string
+		wantLabel string
+		wantOK    bool
+	}{
+		{"Performing transcription...", "transcribing…", true},
+		{"Performing alignment...", "aligning…", true},
+		{">>Performing diarization...", "diarizing…", true},
+		{"Lightning automatically upgraded checkpoint", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		label, ok := WhisperXPhaseLabel(tt.line)
+		if ok != tt.wantOK || label != tt.wantLabel {
+			t.Errorf("WhisperXPhaseLabel(%q) = (%q, %v), want (%q, %v)", tt.line, label, ok, tt.wantLabel, tt.wantOK)
+		}
+	}
+}
+
 // fakeWhisperXSuccessScript stands in for a whisperx run that succeeds: it
 // writes a JSON file at <output_dir>/<basename(audio)>.json -- the naming
 // whisperx's own --output_dir/--output_format json produces -- then exits 0.

@@ -205,6 +205,81 @@ func TestFriendlyTranscribeError(t *testing.T) {
 	}
 }
 
+// realPyannoteWarning is the actual, unmodified UserWarning pyannote.audio
+// emits during diarization -- the recurring noise IsNoiseLine exists to
+// filter out of the TUI's on-screen tail (it's harmless, not an error, and
+// drowns out useful lines like "Performing diarization...").
+const realPyannoteWarningLine1 = `/opt/homebrew/Caskroom/miniconda/base/envs/whisperx/lib/python3.10/site-packages/pyannote/audio/models/blocks/pooling.py:103: UserWarning: std(): degrees of freedom is <= 0. Correction should be strictly less than the reduction factor (input numel divided by output numel).`
+const realPyannoteWarningLine2 = `  std = sequences.std(dim=-1, correction=1)`
+
+func TestIsNoiseLine(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want bool
+	}{
+		{"empty line", "", true},
+		{"whitespace-only line", "   ", true},
+		{"real pyannote warning header", realPyannoteWarningLine1, true},
+		{"real pyannote warning source snippet", realPyannoteWarningLine2, true},
+		{"traceback header", "Traceback (most recent call last):", true},
+		{"traceback frame", `  File "whisperx/asr.py", line 42, in transcribe`, true},
+		{"tqdm progress bar", "45%|####      | 12/27 [00:03<00:04, 3.21it/s]", true},
+		{"useful info line", "Performing diarization...", false},
+		{"useful info line 2", "Performing transcription...", false},
+		{"transcript-looking content", "[SPEAKER_00] Buongiorno a tutti", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsNoiseLine(tt.line); got != tt.want {
+				t.Errorf("IsNoiseLine(%q) = %v, want %v", tt.line, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestStartWhisperWritesTranscribeLog verifies every line whisper-cli prints
+// (noise included -- filtering is display-only) lands in
+// <record dir>/transcribe.log, appended rather than truncated.
+func TestStartWhisperWritesTranscribeLog(t *testing.T) {
+	scriptDir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"echo 'some warning line' >&2\n" +
+		strings.Replace(fakeWhisperSuccessScript, "ARGSFILE", filepath.Join(scriptDir, "args.txt"), 1)
+	if err := os.WriteFile(filepath.Join(scriptDir, "whisper-cli"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake whisper-cli: %v", err)
+	}
+	t.Setenv("PATH", scriptDir+":"+os.Getenv("PATH"))
+
+	recordDir := t.TempDir()
+	logPath := filepath.Join(recordDir, "transcribe.log")
+	if err := os.WriteFile(logPath, []byte("previous run\n"), 0o644); err != nil {
+		t.Fatalf("seed transcribe.log: %v", err)
+	}
+
+	outPrefix := filepath.Join(recordDir, "transcript")
+	job, err := StartWhisper(context.Background(), "model.bin", "en", outPrefix, "audio.wav")
+	if err != nil {
+		t.Fatalf("StartWhisper: %v", err)
+	}
+	for range job.Lines() {
+	}
+	if err := <-job.Wait(); err != nil {
+		t.Fatalf("Wait(): %v", err)
+	}
+
+	got, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read transcribe.log: %v", err)
+	}
+	if !strings.Contains(string(got), "previous run") {
+		t.Errorf("transcribe.log = %q, want it appended (previous content preserved)", got)
+	}
+	if !strings.Contains(string(got), "some warning line") {
+		t.Errorf("transcribe.log = %q, want it to contain the backend's full (unfiltered) output", got)
+	}
+}
+
 // fakeWhisperSuccessScript stands in for a whisper-cli run that succeeds: it
 // captures its full argv to argsFile (before shift consumes it) and writes
 // dummy output at the prefix passed via -of, then exits 0 -- enough for

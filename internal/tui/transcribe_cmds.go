@@ -13,8 +13,14 @@ import (
 )
 
 // transcribePrereqMsg reports whether the configured backend (whisper-cli
-// or whisperx) is ready to transcribe, before actually starting a run.
+// or whisperx) is ready to transcribe rec, before actually starting a run.
+// rec travels with the message (rather than being read back off the Model)
+// so a reply can never be misattributed to whatever record happens to be
+// m.transcribeTarget by the time it arrives -- list navigation is free
+// while jobs run in the background, so a second prereq check can well be
+// in flight for a different record before the first one's reply lands.
 type transcribePrereqMsg struct {
+	rec          records.Record
 	missingMsg   string                   // non-empty: guided message, route to modeTranscribeMissingPrereq
 	install      *transcribe.InstallOffer // non-nil: offer to install the missing binary
 	modelMissing bool
@@ -23,11 +29,11 @@ type transcribePrereqMsg struct {
 
 // checkTranscribePrereqsCmd checks the configured backend's prerequisites in
 // one round-trip, so the TUI can route to the right screen (message, tool
-// install offer, model download offer, or straight to transcribing).
-func checkTranscribePrereqsCmd(cfg config.Config) tea.Cmd {
+// install offer, model download offer, or straight to transcribing) for rec.
+func checkTranscribePrereqsCmd(cfg config.Config, rec records.Record) tea.Cmd {
 	return func() tea.Msg {
 		status := transcribe.CheckPrereqs(cfg)
-		return transcribePrereqMsg{missingMsg: status.MissingMsg, install: status.Install, modelMissing: status.ModelMissing, modelPath: status.ModelPath}
+		return transcribePrereqMsg{rec: rec, missingMsg: status.MissingMsg, install: status.Install, modelMissing: status.ModelMissing, modelPath: status.ModelPath}
 	}
 }
 
@@ -98,67 +104,76 @@ func awaitInstallCmd(job *transcribe.Job) tea.Cmd {
 	}
 }
 
-// transcribeStartedMsg is delivered once afconvert + whisper-cli have been
+// transcribeStartedMsg is delivered once afconvert + the backend have been
 // kicked off (or failed to start, including via cancellation: err wraps
-// context.Canceled then).
+// context.Canceled then) for id's job.
 type transcribeStartedMsg struct {
+	id         string
 	job        *transcribe.Job
 	tmpWavPath string
 	err        error
 }
 
-// startTranscribeRunCmd converts rec's audio to WAV and starts whisper-cli
-// over it. tmpWavPath is only removed once the whisper-cli job is observed
-// to finish (see the Model's transcribeDoneMsg handling), since it's still
-// being read by the subprocess until then. Canceling ctx aborts whichever of
-// the two subprocesses is running.
+// startTranscribeRunCmd converts rec's audio to WAV and starts the
+// configured backend over it. tmpWavPath is only removed once the job is
+// observed to finish (see finishTranscribeJob), since it's still being read
+// by the subprocess until then. Canceling ctx aborts whichever of the two
+// subprocesses is running.
 func startTranscribeRunCmd(ctx context.Context, cfg config.Config, rec records.Record) tea.Cmd {
 	return func() tea.Msg {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return transcribeStartedMsg{err: err}
+			return transcribeStartedMsg{id: rec.ID, err: err}
 		}
 
 		recordDir := filepath.Join(cfg.OutputDir, rec.ID)
 		tmpWav, err := os.CreateTemp("", "nastro-transcribe-*.wav")
 		if err != nil {
-			return transcribeStartedMsg{err: err}
+			return transcribeStartedMsg{id: rec.ID, err: err}
 		}
 		tmpWavPath := tmpWav.Name()
 		tmpWav.Close()
 
 		if err := transcribe.ConvertToWav(ctx, filepath.Join(recordDir, "audio.m4a"), tmpWavPath); err != nil {
 			os.Remove(tmpWavPath)
-			return transcribeStartedMsg{err: err}
+			return transcribeStartedMsg{id: rec.ID, err: err}
 		}
 
 		job, err := transcribe.StartTranscribeBackend(ctx, cfg, home, filepath.Join(recordDir, "transcript"), tmpWavPath)
 		if err != nil {
 			os.Remove(tmpWavPath)
-			return transcribeStartedMsg{err: err}
+			return transcribeStartedMsg{id: rec.ID, err: err}
 		}
-		return transcribeStartedMsg{job: job, tmpWavPath: tmpWavPath}
+		return transcribeStartedMsg{id: rec.ID, job: job, tmpWavPath: tmpWavPath}
 	}
 }
 
-// transcribeLineMsg carries one line of whisper-cli's combined stdout/stderr.
-type transcribeLineMsg struct{ line string }
+// transcribeLineMsg carries one line of id's job's combined stdout/stderr.
+type transcribeLineMsg struct {
+	id   string
+	line string
+}
 
-// transcribeDoneMsg is delivered once, when whisper-cli exits.
-type transcribeDoneMsg struct{ err error }
+// transcribeDoneMsg is delivered once, when id's job exits.
+type transcribeDoneMsg struct {
+	id  string
+	err error
+}
 
-// awaitTranscribeCmd is whisper-cli's heartbeat, mirroring awaitCmd.
-func awaitTranscribeCmd(job *transcribe.Job) tea.Cmd {
+// awaitTranscribeCmd is id's job heartbeat, mirroring awaitCmd. One instance
+// runs per in-flight job -- bubbletea runs every returned Cmd in its own
+// goroutine, so N concurrent jobs simply mean N concurrent loops here.
+func awaitTranscribeCmd(id string, job *transcribe.Job) tea.Cmd {
 	return func() tea.Msg {
 		for {
 			select {
 			case err := <-job.Wait():
-				return transcribeDoneMsg{err: err}
+				return transcribeDoneMsg{id: id, err: err}
 			case line, ok := <-job.Lines():
 				if !ok {
 					continue // closed right as Wait() becomes ready; loop picks it up
 				}
-				return transcribeLineMsg{line: line}
+				return transcribeLineMsg{id: id, line: line}
 			}
 		}
 	}
