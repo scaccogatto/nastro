@@ -1,47 +1,47 @@
 # Features (auto-workshop 2026-08-06)
 
-Contesto d'uso: call Google Meet in italiano con clienti, da Ghostty/herdr, tutto locale, trascrizione in autonomia. Un solo utente (per ora).
+Use context: Italian Google Meet calls with clients from Ghostty/herdr, all local, self-contained transcription. Single user (for now).
 
 ## Must (v0.1)
 
 | Feature | Note |
 |---|---|
-| Cattura audio sistema + mic, mixati | via `nastro-tap`; macOS 14.4+ |
-| `nastro record` headless | funziona anche senza TUI: parte, mostra timer, Ctrl+C ferma e salva |
-| Scrittura incrementale | il file è valido anche dopo crash/kill: mai perdere una call |
-| Output ordinato | `~/Recordings/nastro/<YYYY-MM-DD-HHmm>-<slug>/audio.m4a` |
-| `nastro records` | lista: data, slug, durata, size, stato transcript (✓/-) |
-| `nastro transcribe <id\|last>` | whisperx (default) con speaker diarization, `-l it` di default, output `.txt` + `.srt` con prefisso `[SPEAKER_NN]` accanto all'audio; richiede un token HuggingFace (`hf_token` in config o `$HF_TOKEN`). `transcriber = "whisper-cli"` in config torna al backend senza diarization. Plug-and-play sulle dipendenze: whisperx/whisper-cli/uv vengono trovati anche fuori dal PATH (`~/.local/bin`, Homebrew), e se mancano nastro si offre di installarli lui (conferma esplicita, mai automatico) |
-| Config TOML | `~/.config/nastro/config.toml`: output dir, modello, lingua, backend (`transcriber`), `hf_token` |
-| Timer + livelli in TUI | feedback che sta davvero registrando (VU meter basico) |
+| Capture system audio + mic, mixed | via `nastro-tap`; macOS 14.4+ |
+| `nastro record` headless | works without TUI: starts, shows timer, Ctrl+C stops and saves |
+| Incremental write | file is valid even after crash/kill: never lose a call |
+| Ordered output | `~/Recordings/nastro/<YYYY-MM-DD-HHmm>-<slug>/audio.m4a` |
+| `nastro records` | list: date, slug, duration, size, transcript status (✓/-) |
+| `nastro transcribe <id\|last>` | whisperx (default) with speaker diarization, `-l it` by default, output `.txt` + `.srt` with `[SPEAKER_NN]` prefix alongside audio; requires HuggingFace token (`hf_token` in config or `$HF_TOKEN`). `transcriber = "whisper-cli"` in config falls back to no-diarization backend. Plug-and-play dependencies: whisperx/whisper-cli/uv found outside PATH too (`~/.local/bin`, Homebrew), and if missing nastro offers to install them (explicit confirmation, never automatic) |
+| TOML config | `~/.config/nastro/config.toml`: output dir, model, language, backend (`transcriber`), `hf_token` |
+| Timer + levels in TUI | feedback that recording is really happening (basic VU meter) |
 
 ## Should (v0.2)
 
 | Feature | Note |
 |---|---|
-| Tracce separate mic/sistema | due file: abilita diarization "povera" (io vs loro) senza ML |
-| Hook post-recording | comando arbitrario da config (es. transcribe automatico) |
-| Notifica macOS a fine transcribe | le trascrizioni lunghe girano in background |
-| `records`: azioni sulla lista | invio=dettaglio, `t`=transcribe, `o`=apri in Finder, `d`=elimina (con conferma) |
-| Download modello whisper al primo uso | `nastro transcribe` scarica il ggml se assente, con progress |
+| Separate mic/system tracks | two files: enables "poor man's" diarization (me vs them) without ML |
+| Post-recording hook | arbitrary command from config (e.g. auto-transcribe) |
+| macOS notification at transcribe end | long transcriptions run in background |
+| `records`: actions on list | enter=detail, `t`=transcribe, `o`=open in Finder, `d`=delete (with confirmation) |
+| Download whisper model on first use | `nastro transcribe` fetches ggml if absent, with progress |
 
-## Could (fase 2+)
+## Could (phase 2+)
 
 | Feature | Note |
 |---|---|
-| Video opzionale (`record --video`) | ScreenCaptureKit; il file cresce, va reso esplicito |
-| Export markdown | transcript + metadati pronti per Obsidian/note cliente |
+| Optional video (`record --video`) | ScreenCaptureKit; file grows, must be explicit |
+| Export markdown | transcript + metadata ready for Obsidian/client notes |
 
-## Won't (deliberato)
+## Won't (deliberate)
 
-- Summarization AI / integrazioni cloud: la conversione è "in autonomia" per scelta
-- GUI, menu bar app: esiste già QuickRecorder per quello. Eccezione implementata: indicatore ● in menu bar mentre la cattura è attiva (NSStatusItem nel tap, best-effort, nessuna app)
-- Auto-start su rilevamento meeting: YAGNI, e odore di sorveglianza
-- Notarizzazione/distribuzione firmata: uso personale, `brew tap` personale basta
+- AI summarization / cloud integrations: "self-contained" is by choice
+- GUI, menu bar app: QuickRecorder already does that. Exception implemented: indicator ● in menu bar while capture is active (NSStatusItem in tap, best-effort, no app)
+- Auto-start on meeting detection: YAGNI, and surveillance smell
+- Notarization / signed distribution: personal use, personal `brew tap` suffices
 
-## Rischi noti
+## Known risks
 
-1. **TCC**: il permesso registrazione schermo/audio va a Ghostty, non a `nastro`. Prompt una tantum, da documentare
-2. **macOS < 14.4**: niente process tap → fuori scope (la macchina è su Tahoe)
-3. **Sleep durante la call**: `caffeinate` implicito durante `record`
-4. **Disco pieno**: check spazio all'avvio della registrazione, warning sotto 1GB
+1. **TCC**: screen/audio recording permission goes to Ghostty, not `nastro`. One-time prompt, document this
+2. **macOS < 14.4**: no process tap → out of scope (machine is on Tahoe)
+3. **Sleep during call**: implicit `caffeinate` during `record`
+4. **Disk full**: check space at start of recording, warning below 1GB

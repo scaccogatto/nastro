@@ -1,30 +1,30 @@
 # Naming
 
-## Scelto: `nastro`
+## Chosen: `nastro`
 
-Italiano per "tape". Corto, tipabile, evocativo, e dentro la cultura dei terminal-recorder (charmbracelet/vhs registra "tape files": nastro è il vhs italiano).
+Italian for "tape". Short, typeable, evocative, and within the culture of terminal-recorders (charmbracelet/vhs records "tape files": nastro is the Italian vhs).
 
-## Verifica collisioni (2026-08-06)
+## Collision check (2026-08-06)
 
-| Registry | Esito |
+| Registry | Result |
 |---|---|
-| GitHub | Nessun progetto "nastro"; solo repo cechi non correlati ("nastroje" = strumenti in ceco) |
-| crates.io | Libero |
-| npm | 404 (libero) |
-| Homebrew | Nessuna formula/cask |
+| GitHub | No project "nastro"; only unrelated Czech repos ("nastroje" = tools in Czech) |
+| crates.io | Free |
+| npm | 404 (free) |
+| Homebrew | No formula/cask |
 
-## Candidati scartati
+## Rejected candidates
 
-| Nome | Motivo |
+| Name | Reason |
 |---|---|
-| bobina | Runner-up valido, meno immediato |
-| fono | Collide con fonoster (8K⭐, dominio voice: troppo vicino) |
-| traccia | traccia-ai esiste, npm occupato |
-| presa | npm occupato, vicino a presage |
-| incidi | Libero ma poco leggibile fuori dall'italiano |
-| vhs / tape / deck / rec | Occupati o troppo generici |
+| bobina | Valid runner-up, less immediate |
+| fono | Collides with fonoster (8K⭐, voice domain: too close) |
+| traccia | traccia-ai exists, npm occupied |
+| presa | npm occupied, close to presage |
+| incidi | Free but hard to read outside Italian |
+| vhs / tape / deck / rec | Occupied or too generic |
 
-## Binari
+## Binaries
 
-- `nastro` - CLI/TUI principale (Go)
-- `nastro-tap` - helper di cattura (Swift). "tap" = CoreAudio process tap, nome descrittivo
+- `nastro` - Main CLI/TUI (Go)
+- `nastro-tap` - Capture helper (Swift). "tap" = CoreAudio process tap, descriptive name
