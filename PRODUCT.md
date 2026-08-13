@@ -23,7 +23,7 @@ Only terminal call recorder: no bot entering call (capture via CoreAudio process
 - macOS 14.4+ (CoreAudio process tap); TCC capture permission goes to host terminal, not the binary
 - Typically runs in a herdr pane inside Ghostty; paths in TUI are clickable OSC 8 links
 - Filesystem as source of truth: one directory per recording in `~/Recordings/nastro/`, no database
-- Transcription: whisper.cpp (`whisper-cli`) + local ggml model, default `large-v3-turbo`, default language `it`
+- Transcription: whisper.cpp (`whisper-cli`) + local ggml model by default (fast, zero accounts); WhisperX with pyannote diarization as guided opt-in (`transcriber = "whisperx"`, HF token). Default model `large-v3-turbo`, default language `it`
 - Config: `~/.config/nastro/config.toml`, defaults in memory, never written by tool
 
 ## Capabilities and Constraints
