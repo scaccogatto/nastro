@@ -1,6 +1,6 @@
 // Package transcribe implements `nastro transcribe <id|last>`: resolving the
-// target record and driving one of two backends via afconvert -- whisperx
-// (default, with speaker diarization) or whisper-cli. Its phases (check
+// target record and driving one of two backends via afconvert -- whisper-cli
+// (default, fast, no accounts) or whisperx (speaker diarization). Its phases (check
 // prereqs, convert, run, download) are exposed as separate, reusable
 // functions so the TUI can drive them without going through the CLI's
 // stdin-prompt flow.
@@ -78,6 +78,12 @@ func DownloadPercent(downloaded, total int64) float64 {
 // whisperProgressPrefix is the line prefix whisper-cli's --print-progress
 // emits progress updates on.
 const whisperProgressPrefix = "whisper_print_progress_callback: progress = "
+
+// TranscribeTip is the one-line upsell shown after a successful whisper-cli
+// transcription, pointing at whisperx for speaker labels -- whisper-cli is
+// the default backend (fast, no accounts) but doesn't diarize. Shared by the
+// CLI (Run, printed every time) and the TUI (shown once per session).
+const TranscribeTip = `tip: want [SPEAKER_00] labels? set transcriber = "whisperx"`
 
 // ParseWhisperProgress parses one line of whisper-cli's combined
 // stdout/stderr for a --print-progress update ("whisper_print_progress_callback:
@@ -591,7 +597,7 @@ func confirmAndInstall(offer InstallOffer) (installed bool, err error) {
 }
 
 // Run resolves idOrLast against cfg.OutputDir and transcribes it with
-// cfg.Transcriber's backend (whisperx by default, or whisper-cli),
+// cfg.Transcriber's backend (whisper-cli by default, or whisperx),
 // converting the source audio to WAV via afconvert first. Its overwrite
 // confirmation reads from stdin directly: the CLI is the one caller that's
 // expected to (the TUI drives the same phases itself, with an inline y/n
@@ -667,6 +673,9 @@ func Run(cfg config.Config, idOrLast string) error {
 	}
 	if err := <-job.Wait(); err != nil {
 		return errors.New(FriendlyTranscribeError(err, output.String()))
+	}
+	if cfg.Transcriber != "whisperx" {
+		fmt.Println(TranscribeTip)
 	}
 	return nil
 }

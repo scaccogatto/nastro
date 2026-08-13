@@ -13,7 +13,7 @@ func TestDefault(t *testing.T) {
 		OutputDir:                 filepath.Join("/home/user", "Recordings", "nastro"),
 		WhisperModel:              "large-v3-turbo",
 		Lang:                      "it",
-		Transcriber:               "whisperx",
+		Transcriber:               "whisper-cli",
 		MaxParallelTranscriptions: 2,
 	}
 	if got != want {
@@ -49,7 +49,7 @@ func TestLoadFrom(t *testing.T) {
 				OutputDir:                 filepath.Join("/home/user", "Recordings", "nastro"),
 				WhisperModel:              "large-v3-turbo",
 				Lang:                      "en",
-				Transcriber:               "whisperx",
+				Transcriber:               "whisper-cli",
 				MaxParallelTranscriptions: 2,
 			},
 		},

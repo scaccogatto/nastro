@@ -7,6 +7,7 @@ import (
 
 	"github.com/scaccogatto/nastro/internal/config"
 	"github.com/scaccogatto/nastro/internal/records"
+	"github.com/scaccogatto/nastro/internal/transcribe"
 )
 
 func rec(id string) records.Record { return records.Record{ID: id} }
@@ -210,7 +211,7 @@ func TestHandleTranscribeStartedIgnoresUnknownID(t *testing.T) {
 // user is watching a *different* screen (e.g. the list, or another job's
 // screen) must not yank navigation -- only a status line + silent rescan.
 func TestUnfocusedJobFinishLeavesModeAlone(t *testing.T) {
-	m := New(config.Config{OutputDir: t.TempDir(), MaxParallelTranscriptions: 2}, nil)
+	m := New(config.Config{OutputDir: t.TempDir(), Transcriber: "whisperx", MaxParallelTranscriptions: 2}, nil)
 	m, _ = m.admitTranscribeJob(rec("a"))
 	m, _ = m.admitTranscribeJob(rec("b"))
 	m.transcribeJobs["a"].cancel = func() {}
@@ -254,6 +255,68 @@ func TestJobStatusSummary(t *testing.T) {
 				t.Errorf("jobStatusSummary() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTranscribedStatus(t *testing.T) {
+	tests := []struct {
+		name          string
+		transcriber   string
+		tipShown      bool
+		wantStatus    string
+		wantNextShown bool
+	}{
+		{"whisper-cli first completion adds the tip", "whisper-cli", false, "transcribed a · " + transcribe.TranscribeTip, true},
+		{"whisper-cli second completion stays plain", "whisper-cli", true, "transcribed a", true},
+		{"whisperx never shows the tip", "whisperx", false, "transcribed a", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status, nextShown := transcribedStatus("a", tt.transcriber, tt.tipShown)
+			if status != tt.wantStatus {
+				t.Errorf("transcribedStatus() status = %q, want %q", status, tt.wantStatus)
+			}
+			if nextShown != tt.wantNextShown {
+				t.Errorf("transcribedStatus() nextTipShown = %v, want %v", nextShown, tt.wantNextShown)
+			}
+		})
+	}
+}
+
+// TestFinishTranscribeJobTipOncePerSession: the whisperx upsell tip appears
+// on the first whisper-cli job's completion and not on the second, within
+// the same Model (session).
+func TestFinishTranscribeJobTipOncePerSession(t *testing.T) {
+	m := New(config.Config{OutputDir: t.TempDir(), Transcriber: "whisper-cli", MaxParallelTranscriptions: 2}, nil)
+	m, _ = m.admitTranscribeJob(rec("a"))
+	m, _ = m.admitTranscribeJob(rec("b"))
+
+	m, _ = m.finishTranscribeJob("a", nil)
+	if want := "transcribed a · " + transcribe.TranscribeTip; m.statusMsg != want {
+		t.Errorf("first completion statusMsg = %q, want %q", m.statusMsg, want)
+	}
+	if !m.tipShown {
+		t.Errorf("tipShown = false after first whisper-cli completion, want true")
+	}
+
+	m, _ = m.finishTranscribeJob("b", nil)
+	if want := "transcribed b"; m.statusMsg != want {
+		t.Errorf("second completion statusMsg = %q, want %q (no repeated tip)", m.statusMsg, want)
+	}
+}
+
+// TestFinishTranscribeJobNoTipForWhisperX: whisperx already diarizes, so its
+// completions never show the upsell tip.
+func TestFinishTranscribeJobNoTipForWhisperX(t *testing.T) {
+	m := New(config.Config{OutputDir: t.TempDir(), Transcriber: "whisperx", MaxParallelTranscriptions: 2}, nil)
+	m, _ = m.admitTranscribeJob(rec("a"))
+
+	m, _ = m.finishTranscribeJob("a", nil)
+	if want := "transcribed a"; m.statusMsg != want {
+		t.Errorf("statusMsg = %q, want %q", m.statusMsg, want)
+	}
+	if m.tipShown {
+		t.Errorf("tipShown = true for whisperx completion, want false")
 	}
 }
 

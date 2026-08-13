@@ -168,6 +168,12 @@ type Model struct {
 
 	statusMsg   string
 	statusIsErr bool
+
+	// tipShown is whether the whisper-cli -> whisperx upsell tip has already
+	// been appended to a "transcribed <id>" status this TUI session -- see
+	// transcribedStatus, shown at most once regardless of how many whisper-cli
+	// jobs complete.
+	tipShown bool
 }
 
 // New builds a Model listing recs, configured to start recordings under cfg.

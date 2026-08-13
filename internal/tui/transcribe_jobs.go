@@ -219,7 +219,8 @@ func (m Model) finishTranscribeJob(id string, err error) (Model, tea.Cmd) {
 		return m, promoteCmd
 
 	default:
-		status := "transcribed " + rec.ID
+		var status string
+		status, m.tipShown = transcribedStatus(rec.ID, m.cfg.Transcriber, m.tipShown)
 		m.statusMsg = status
 		m.statusIsErr = false
 		if focused && returnTo == modeDetail && m.detailRec.ID == rec.ID {
@@ -232,6 +233,21 @@ func (m Model) finishTranscribeJob(id string, err error) (Model, tea.Cmd) {
 		}
 		return m, tea.Batch(promoteCmd, rescanCmd(m.cfg.OutputDir, status, false))
 	}
+}
+
+// transcribedStatus renders the list's "transcribed <id>" status line for a
+// successful job, appending the whisperx upsell tip (transcribe.TranscribeTip)
+// the first time a whisper-cli job completes this session -- tipShown tracks
+// that across calls (Model.tipShown), so the tip is never repeated even
+// though every whisper-cli completion routes through here. No tip for
+// whisperx (it already diarizes) or once tipShown is already true; either
+// way nextTipShown just echoes tipShown back unchanged.
+func transcribedStatus(id, transcriber string, tipShown bool) (status string, nextTipShown bool) {
+	status = "transcribed " + id
+	if transcriber == "whisperx" || tipShown {
+		return status, tipShown
+	}
+	return status + " · " + transcribe.TranscribeTip, true
 }
 
 // listSpinnerFrames animates the list's fixed-width status column for a job

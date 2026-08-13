@@ -1023,7 +1023,7 @@ func TestHandleTranscribeDoneErrorShowsErrorScreen(t *testing.T) {
 
 func TestHandleTranscribeDoneSuccessReturnsToList(t *testing.T) {
 	target := records.Record{ID: "2026-08-06-1430-standup"}
-	m := New(config.Config{OutputDir: t.TempDir()}, nil)
+	m := New(config.Config{OutputDir: t.TempDir(), Transcriber: "whisperx"}, nil)
 	m.mode, m.transcribeTarget = modeTranscribing, target
 	m.transcribeJobs[target.ID] = &transcribeJobState{rec: target, returnTo: modeList, phase: jobRunning, cancel: func() {}}
 

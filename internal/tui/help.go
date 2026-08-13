@@ -49,6 +49,7 @@ func helpContent(m Model) string {
 		"  output dir: "+abbreviateHome(m.cfg.OutputDir, m.homeDir),
 		"  config: "+abbreviateHome(filepath.Join(m.homeDir, ".config", "nastro", "config.toml"), m.homeDir),
 		"  transcriber: "+m.cfg.Transcriber,
+		"  whisper-cli: fast, no accounts · whisperx: adds speaker labels (needs HF token)",
 	)
 	if m.cfg.Transcriber != "whisperx" {
 		lines = append(lines, "  whisper model: "+abbreviateHome(transcribe.ModelPath(m.homeDir, m.cfg.WhisperModel), m.homeDir))

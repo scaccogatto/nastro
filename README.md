@@ -4,7 +4,7 @@
 
 **Record your calls from the terminal. No bots, no cloud.**
 
-System audio + mic capture, local files, on-device diarized transcription.
+System audio + mic capture, local files, on-device transcription — speaker labels one flag away.
 
 [![CI](https://github.com/scaccogatto/nastro/actions/workflows/ci.yml/badge.svg)](https://github.com/scaccogatto/nastro/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -14,20 +14,20 @@ System audio + mic capture, local files, on-device diarized transcription.
 
 ---
 
-Every call recorder wants to join your meeting as a bot, or ship your audio to someone's cloud. nastro does neither: it taps macOS system audio directly (CoreAudio process tap), writes a local file, and transcribes it on your machine with speaker labels — only when you ask.
+Every call recorder wants to join your meeting as a bot, or ship your audio to someone's cloud. nastro does neither: it taps macOS system audio directly (CoreAudio process tap), writes a local file, and transcribes it on your machine — only when you ask.
 
 ```
 nastro                      # TUI: browse, record, transcribe
 nastro record               # headless recording, Ctrl+C = save
 nastro records --plain      # scriptable list (tab-separated)
-nastro transcribe last      # diarized transcript, on-device
+nastro transcribe last      # on-device transcript (diarization opt-in)
 ```
 
 ## Why nastro
 
 - **No bot in the call.** Capture happens at the OS level. Nothing joins your meeting, nothing is visible to other participants.
-- **No cloud.** Audio and transcripts never leave your machine. Transcription runs locally (WhisperX or whisper.cpp).
-- **Who said what.** Transcripts come out diarized: `[SPEAKER_00]`, `[SPEAKER_01]` — grouped by speaking turn, with SRT timestamps.
+- **No cloud.** Audio and transcripts never leave your machine. Transcription runs locally (whisper.cpp or WhisperX).
+- **Who said what, one flag away.** Set `transcriber = "whisperx"` for diarized output: `[SPEAKER_00]`, `[SPEAKER_01]` — grouped by speaking turn, with SRT timestamps.
 - **Never lose a call.** Audio is written incrementally: the file is valid even after a crash or `kill -9`. Transcripts are written atomically: an interrupted run never destroys an existing one. Deletes go to the Trash.
 - **Terminal-native.** A fast single-binary TUI that inherits your terminal theme, with a headless CLI twin for scripting. Paths are OSC 8 hyperlinks — cmd+click opens Finder.
 
@@ -52,11 +52,11 @@ On first recording, macOS will ask for **Screen & System Audio Recording** permi
 
 ## Transcription
 
-nastro is plug-and-play about its dependencies: it finds `whisperx`/`whisper-cli` even outside your `PATH`, and offers to install what's missing (via `uv`/`brew`, always with explicit confirmation).
+nastro is plug-and-play about its dependencies: it finds `whisper-cli`/`whisperx` even outside your `PATH`, and offers to install what's missing (via `brew`/`uv`, always with explicit confirmation).
 
-The default backend is **WhisperX** (diarized, speaker-labeled output). It needs one manual step nastro can't do for you: a HuggingFace token with the [pyannote model terms](https://huggingface.co/pyannote/speaker-diarization-community-1) accepted — it's an access grant, not a download. Put it in your config as `hf_token` (or `$HF_TOKEN`). If anything is missing, the TUI walks you through it.
+The default backend is **whisper.cpp**, running on Metal: fast, no accounts. nastro installs it all itself, with confirmation — `brew install whisper-cpp`, then the ggml model, downloaded with progress on first use.
 
-Prefer plain speed over speakers? Set `transcriber = "whisper-cli"` for whisper.cpp on Metal.
+Want who-said-what? Set `transcriber = "whisperx"` for diarized, speaker-labeled output (`[SPEAKER_00]`, `[SPEAKER_01]`, grouped by speaking turn). It needs one manual step nastro can't do for you: a HuggingFace token with the [pyannote model terms](https://huggingface.co/pyannote/speaker-diarization-community-1) accepted — it's an access grant, not a download. Put it in your config as `hf_token` (or `$HF_TOKEN`). If anything is missing, the TUI walks you through it.
 
 ## Keys
 
@@ -66,7 +66,7 @@ Prefer plain speed over speakers? Set `transcriber = "whisper-cli"` for whisper.
 | `s` / `q` / `ctrl+c` | stop & save (while recording) |
 | `x` | discard recording (with confirmation) |
 | `enter` | detail view with transcript preview |
-| `t` | transcribe (diarized) |
+| `t` | transcribe |
 | `o` | reveal in Finder |
 | `d` | delete → Trash |
 | `/` | filter |
@@ -78,7 +78,7 @@ Prefer plain speed over speakers? Set `transcriber = "whisper-cli"` for whisper.
 
 ```toml
 output_dir = "~/Recordings/nastro"
-transcriber = "whisperx"        # or "whisper-cli"
+transcriber = "whisper-cli"     # or "whisperx" for speaker labels
 whisper_model = "large-v3-turbo"
 lang = "it"                     # transcription language
 hf_token = ""                   # HuggingFace token for diarization

@@ -17,8 +17,9 @@ type Config struct {
 	OutputDir    string `toml:"output_dir"`
 	WhisperModel string `toml:"whisper_model"`
 	Lang         string `toml:"lang"`
-	// Transcriber selects the transcribe backend: "whisperx" (default,
-	// speaker diarization) or "whisper-cli" (no diarization).
+	// Transcriber selects the transcribe backend: "whisper-cli" (default,
+	// fast, no accounts, no diarization) or "whisperx" (speaker
+	// diarization, needs an HF token).
 	Transcriber string `toml:"transcriber"`
 	// HFToken is the HuggingFace access token whisperx needs to download
 	// pyannote's gated diarization models. See ResolvedHFToken for the
@@ -36,7 +37,7 @@ func Default(homeDir string) Config {
 		OutputDir:                 filepath.Join(homeDir, "Recordings", "nastro"),
 		WhisperModel:              "large-v3-turbo",
 		Lang:                      "it",
-		Transcriber:               "whisperx",
+		Transcriber:               "whisper-cli",
 		MaxParallelTranscriptions: 2,
 	}
 }

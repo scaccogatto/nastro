@@ -11,7 +11,7 @@ Use context: Italian Google Meet calls with clients from Ghostty/herdr, all loca
 | Incremental write | file is valid even after crash/kill: never lose a call |
 | Ordered output | `~/Recordings/nastro/<YYYY-MM-DD-HHmm>-<slug>/audio.m4a` |
 | `nastro records` | list: date, slug, duration, size, transcript status (✓/-) |
-| `nastro transcribe <id\|last>` | whisperx (default) with speaker diarization, `-l it` by default, output `.txt` + `.srt` with `[SPEAKER_NN]` prefix alongside audio; requires HuggingFace token (`hf_token` in config or `$HF_TOKEN`). `transcriber = "whisper-cli"` in config falls back to no-diarization backend. Plug-and-play dependencies: whisperx/whisper-cli/uv found outside PATH too (`~/.local/bin`, Homebrew), and if missing nastro offers to install them (explicit confirmation, never automatic) |
+| `nastro transcribe <id\|last>` | whisper-cli (default, whisper.cpp on Metal, no accounts, no diarization) with `-l it` by default, output `.txt` + `.srt` alongside audio. `transcriber = "whisperx"` in config opts into speaker diarization (`[SPEAKER_NN]` prefix, requires HuggingFace token: `hf_token` in config or `$HF_TOKEN`). Plug-and-play dependencies: whisper-cli/whisperx/uv found outside PATH too (`~/.local/bin`, Homebrew), and if missing nastro offers to install them (explicit confirmation, never automatic) |
 | TOML config | `~/.config/nastro/config.toml`: output dir, model, language, backend (`transcriber`), `hf_token` |
 | Timer + levels in TUI | feedback that recording is really happening (basic VU meter) |
 
