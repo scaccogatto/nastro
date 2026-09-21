@@ -7,10 +7,16 @@ PREFIX ?= /usr/local
 
 build: build-go build-tap
 
-build-go:
+# Order-only prerequisite on bin/: Homebrew builds with a parallel make, and
+# build-tap otherwise races build-go for the directory, failing with
+# "ld: open() failed, errno=2 ... for bin/nastro-tap".
+bin:
+	mkdir -p bin
+
+build-go: | bin
 	$(GO) build -o bin/nastro .
 
-build-tap:
+build-tap: | bin
 	/usr/bin/swiftc -O -framework CoreAudio -framework AVFoundation -framework AudioToolbox \
 		-framework AppKit -framework CoreGraphics \
 		-o bin/nastro-tap tap/main.swift
