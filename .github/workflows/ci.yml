@@ -19,6 +19,9 @@ jobs:
       - name: Build
         run: make build
 
+      - name: nastro-tap self-check
+        run: make check-tap
+
       - name: gofmt
         run: |
           fmt_out="$(gofmt -l .)"

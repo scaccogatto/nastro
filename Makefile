@@ -1,4 +1,4 @@
-.PHONY: build build-go build-tap clean install
+.PHONY: build build-go build-tap check-tap clean install
 
 # Plain `go` when it's on PATH (CI, Homebrew, contributors); mise fallback
 # for dev machines that manage Go through mise only.
@@ -14,6 +14,9 @@ build-tap:
 	/usr/bin/swiftc -O -framework CoreAudio -framework AVFoundation -framework AudioToolbox \
 		-framework AppKit -framework CoreGraphics \
 		-o bin/nastro-tap tap/main.swift
+
+check-tap: build-tap
+	bin/nastro-tap --self-check
 
 install: build
 	install -d $(PREFIX)/bin
