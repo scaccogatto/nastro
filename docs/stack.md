@@ -7,7 +7,7 @@
 | TUI/CLI | **Go + Bubble Tea v2** | `nastro` binary, all interface and orchestration |
 | UI Components | Bubbles v2 (list, spinner, timer, help, key) | records/record screens |
 | Styling | Lip Gloss | ANSI colors 0-15 only, so the TUI inherits the terminal's own theme |
-| Options form | Bubbles v2 `textinput` (`internal/tui/nameform.go`) | `record` name and capture mode in TUI |
+| Options form | Bubbles v2 `textinput` plus a tab-cycled capture mode (`internal/tui/nameform.go`) | `record` name and capture mode in TUI |
 | Audio capture | **Swift + CoreAudio process tap** (`nastro-tap` binary) | system audio + mic, macOS 14.4+ |
 | Transcription | **whisper.cpp** (`whisper-cli`, subprocess) | local, ggml models, `-l auto` by default (`lang` in config) |
 | Video (phase 2) | ScreenCaptureKit (extension to `nastro-tap`) | optional |
