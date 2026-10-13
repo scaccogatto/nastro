@@ -6,16 +6,16 @@
 |---|---|---|
 | TUI/CLI | **Go + Bubble Tea v2** | `nastro` binary, all interface and orchestration |
 | UI Components | Bubbles v2 (list, spinner, timer, help, key) | records/record screens |
-| Styling | Lip Gloss | theme (Catppuccin palette, consistent with rest of setup) |
-| Options form | huh | `record` options in TUI |
+| Styling | Lip Gloss | ANSI colors 0-15 only, so the TUI inherits the terminal's own theme |
+| Options form | Bubbles v2 `textinput` plus a tab-cycled capture mode (`internal/tui/nameform.go`) | `record` name and capture mode in TUI |
 | Audio capture | **Swift + CoreAudio process tap** (`nastro-tap` binary) | system audio + mic, macOS 14.4+ |
-| Transcription | **whisper.cpp** (`whisper-cli`, subprocess) | local, ggml models, `-l it` |
+| Transcription | **whisper.cpp** (`whisper-cli`, subprocess) | local, ggml models, `-l auto` by default (`lang` in config) |
 | Video (phase 2) | ScreenCaptureKit (extension to `nastro-tap`) | optional |
 
 ## Why Bubble Tea
 
 - **Elm Architecture** (Model → Update → View): pure FP, side effects confined to `tea.Cmd`. Consistent with personal rule "at equal maturity, choose the FP option".
-- Maximum maturity in the field: 44K⭐, daily pushes, charmbracelet ecosystem (bubbles/lipgloss/huh) covers exactly the planned screens (verified on context7: custom-delegate lists, spinner/timer, subprocess execution with `tea.ExecProcess`).
+- Maximum maturity in the field: 44K⭐, daily pushes, charmbracelet ecosystem (bubbles/lipgloss) covers exactly the planned screens (verified on context7: custom-delegate lists, spinner/timer, subprocess execution with `tea.ExecProcess`).
 - Single static binary: trivial brew distribution, runs cleanly in a herdr pane.
 - Go: learnable in a day from TS; TUI code is almost all declarative patterns.
 
@@ -35,7 +35,7 @@ Community sentiment (run /last30days 2026-08-06): no fresh direct comparison in 
 ```
 nastro (Go, TUI+CLI)
   ├─ exec → nastro-tap (Swift)     # capture; progress on stdout (JSON lines)
-  │           └─ writes .m4a/.wav incrementally to ~/Recordings/nastro/<slug>/
+  │           └─ writes audio.m4a (AAC) incrementally to ~/Recordings/nastro/<slug>/
   └─ exec → whisper-cli            # transcription; .txt/.srt alongside audio
 ```
 

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/scaccogatto/nastro/internal/config"
 )
 
 func TestSlugify(t *testing.T) {
@@ -301,4 +303,53 @@ func TestDescribeTapExit(t *testing.T) {
 			t.Errorf("DescribeTapExit() = %q, want it to include stderr", err.Error())
 		}
 	})
+}
+
+func TestLockfileIsPrivate(t *testing.T) {
+	dir := t.TempDir()
+	f, err := AcquireLock(dir)
+	if err != nil {
+		t.Fatalf("AcquireLock() error: %v", err)
+	}
+	defer ReleaseLock(f, dir)
+	assertMode(t, LockPath(dir), config.PrivateFileMode)
+}
+
+// TestStartCreatesPrivateDirs runs Start without any nastro-tap reachable, so
+// it fails right after creating the output and record dirs: enough to check
+// their modes without recording anything.
+func TestStartCreatesPrivateDirs(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	outputDir := filepath.Join(t.TempDir(), "Recordings", "nastro")
+
+	if _, err := Start(config.Config{OutputDir: outputDir}, Options{Name: "perm"}); err == nil {
+		t.Fatalf("Start() error = nil, want nastro-tap not found")
+	}
+
+	assertMode(t, outputDir, config.PrivateDirMode)
+	entries, err := os.ReadDir(outputDir)
+	if err != nil {
+		t.Fatalf("read output dir: %v", err)
+	}
+	var recordDirs int
+	for _, e := range entries {
+		if e.IsDir() {
+			recordDirs++
+			assertMode(t, filepath.Join(outputDir, e.Name()), config.PrivateDirMode)
+		}
+	}
+	if recordDirs != 1 {
+		t.Errorf("record dirs created = %d, want 1", recordDirs)
+	}
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("mode of %s = %o, want %o", filepath.Base(path), got, want)
+	}
 }

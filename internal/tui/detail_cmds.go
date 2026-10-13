@@ -9,6 +9,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/scaccogatto/nastro/internal/config"
 	"github.com/scaccogatto/nastro/internal/records"
 )
 
@@ -120,7 +121,7 @@ func moveToTrash(src, trashDir string) (dest string, err error) {
 	if trashDir == "" {
 		return "", fmt.Errorf("no Trash directory (home directory unresolved)")
 	}
-	if err := os.MkdirAll(trashDir, 0o755); err != nil {
+	if err := os.MkdirAll(trashDir, config.PrivateDirMode); err != nil {
 		return "", fmt.Errorf("create Trash dir: %w", err)
 	}
 

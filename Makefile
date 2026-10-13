@@ -4,6 +4,9 @@
 # for dev machines that manage Go through mise only.
 GO := $(shell command -v go >/dev/null 2>&1 && echo go || echo "mise exec -- go")
 PREFIX ?= /usr/local
+# Shown by `nastro version`. From git when building a checkout, overridable
+# (`make VERSION=1.2.3`) for builds from a release tarball, which has no .git.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 build: build-go build-tap
 
@@ -14,7 +17,7 @@ bin:
 	mkdir -p bin
 
 build-go: | bin
-	$(GO) build -o bin/nastro .
+	$(GO) build -ldflags "-X main.version=$(VERSION)" -o bin/nastro .
 
 build-tap: | bin
 	/usr/bin/swiftc -O -framework CoreAudio -framework AVFoundation -framework AudioToolbox \

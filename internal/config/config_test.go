@@ -12,7 +12,7 @@ func TestDefault(t *testing.T) {
 	want := Config{
 		OutputDir:                 filepath.Join("/home/user", "Recordings", "nastro"),
 		WhisperModel:              "large-v3-turbo",
-		Lang:                      "it",
+		Lang:                      "auto",
 		Transcriber:               "whisper-cli",
 		MaxParallelTranscriptions: 2,
 	}

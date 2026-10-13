@@ -4,6 +4,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/scaccogatto/nastro/internal/config"
@@ -13,7 +14,47 @@ import (
 	"github.com/scaccogatto/nastro/internal/tui"
 )
 
+// version is the release this binary was built from, injected at build time
+// via -ldflags "-X main.version=..." (see the Makefile). "dev" otherwise.
+var version = "dev"
+
+const usage = `nastro: terminal call recorder for macOS
+
+usage:
+  nastro                         open the TUI (browse, record, transcribe)
+  nastro record [flags]          headless recording, Ctrl+C saves
+  nastro records [--plain]       list recordings (--plain: tab-separated)
+  nastro transcribe <id|last>    transcribe a recording on-device
+  nastro help                    show this help
+  nastro version                 print the version
+
+Run "nastro record -h" or "nastro records -h" for their flags.
+Config: ~/.config/nastro/config.toml
+`
+
+// metaCommand handles the commands that must work without a config file
+// (help, version), writing their output to w. handled is false for every
+// other command.
+func metaCommand(args []string, w io.Writer) (handled bool) {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "help", "-h", "--help":
+		fmt.Fprint(w, usage)
+	case "version", "-v", "--version":
+		fmt.Fprintf(w, "nastro %s\n", version)
+	default:
+		return false
+	}
+	return true
+}
+
 func main() {
+	if metaCommand(os.Args[1:], os.Stdout) {
+		return
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
@@ -34,7 +75,7 @@ func main() {
 	case "transcribe":
 		runOrExit(func() error { return runTranscribe(cfg, args[1:]) })
 	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\nusage: nastro [record|records|transcribe] ...\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n%s", args[0], usage)
 		os.Exit(1)
 	}
 }

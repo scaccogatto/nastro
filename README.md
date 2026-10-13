@@ -21,6 +21,8 @@ nastro                      # TUI: browse, record, transcribe
 nastro record               # headless recording, Ctrl+C = save
 nastro records --plain      # scriptable list (tab-separated)
 nastro transcribe last      # on-device transcript (diarization opt-in)
+nastro help                 # usage, also -h/--help
+nastro version              # build version, also --version
 ```
 
 ## Why nastro
@@ -80,7 +82,7 @@ Want who-said-what? Set `transcriber = "whisperx"` for diarized, speaker-labeled
 output_dir = "~/Recordings/nastro"
 transcriber = "whisper-cli"     # or "whisperx" for speaker labels
 whisper_model = "large-v3-turbo"
-lang = "it"                     # transcription language
+lang = "auto"                   # transcription language: "auto" detects it, or e.g. "it", "en"
 hf_token = ""                   # HuggingFace token for diarization
 ```
 
@@ -91,7 +93,7 @@ Two binaries, one job each:
 - **`nastro`** (Go, Bubble Tea) — the TUI/CLI, orchestration, transcription pipeline
 - **`nastro-tap`** (Swift) — audio capture via CoreAudio process tap + mic, incremental AAC writing, a red ● in the menu bar while recording
 
-The filesystem is the source of truth: one directory per recording (`audio.m4a`, `metadata.json`, `transcript.txt/.srt`), no database. Everything the TUI does, the CLI does headless.
+The filesystem is the source of truth: one directory per recording (`audio.m4a`, `metadata.json`, `transcript.txt/.srt`), no database. Recording directories are created owner-only (`0700`) and their files `0600`, so other accounts on a shared Mac cannot read them. Everything the TUI does, the CLI does headless.
 
 ## Requirements
 

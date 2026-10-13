@@ -113,7 +113,7 @@ func isProcessAlive(pid int) bool {
 // tryAcquire atomically creates the lockfile in outputDir with the current
 // pid as its content, failing with fs.ErrExist if one already exists.
 func tryAcquire(outputDir string) (*os.File, error) {
-	f, err := os.OpenFile(LockPath(outputDir), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(LockPath(outputDir), os.O_CREATE|os.O_EXCL|os.O_WRONLY, config.PrivateFileMode)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +271,7 @@ func Start(cfg config.Config, opts Options) (*Session, error) {
 		return nil, fmt.Errorf("--mic-only and --system-only are mutually exclusive")
 	}
 
-	if err := os.MkdirAll(cfg.OutputDir, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.OutputDir, config.PrivateDirMode); err != nil {
 		return nil, fmt.Errorf("create output dir: %w", err)
 	}
 	_, diskWarning := checkLowDiskSpace(cfg.OutputDir)
@@ -283,7 +283,7 @@ func Start(cfg config.Config, opts Options) (*Session, error) {
 
 	dirName := BuildDirName(time.Now(), Slugify(opts.Name))
 	recordDir := filepath.Join(cfg.OutputDir, dirName)
-	if err := os.MkdirAll(recordDir, 0o755); err != nil {
+	if err := os.MkdirAll(recordDir, config.PrivateDirMode); err != nil {
 		_ = ReleaseLock(lockFile, cfg.OutputDir)
 		return nil, fmt.Errorf("create record dir: %w", err)
 	}
