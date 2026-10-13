@@ -5,29 +5,32 @@ on:
     tags:
       - 'v*'
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
+  # The full CI suite (build, tap self-check, gofmt, vet, race tests,
+  # govulncheck) on the tagged commit: nothing is published from a commit
+  # that does not pass it. Homebrew picks releases up automatically.
+  ci:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   release:
-    runs-on: macos-15
-    timeout-minutes: 15
+    needs: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-
-      - name: Build (smoke test)
-        run: make build
-
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            echo "Release $GITHUB_REF_NAME already exists, skipping."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, skipping."
             exit 0
           fi
-          gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release create "$TAG" --verify-tag --generate-notes
