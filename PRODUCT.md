@@ -23,7 +23,7 @@ Only terminal call recorder: no bot entering call (capture via CoreAudio process
 - macOS 14.4+ (CoreAudio process tap); TCC capture permission goes to host terminal, not the binary
 - Typically runs in a herdr pane inside Ghostty; paths in TUI are clickable OSC 8 links
 - Filesystem as source of truth: one directory per recording in `~/Recordings/nastro/`, no database
-- Transcription: whisper.cpp (`whisper-cli`) + local ggml model by default (fast, zero accounts); WhisperX with pyannote diarization as guided opt-in (`transcriber = "whisperx"`, HF token). Default model `large-v3-turbo`, default language `it`
+- Transcription: whisper.cpp (`whisper-cli`) + local ggml model by default (fast, zero accounts); WhisperX with pyannote diarization as guided opt-in (`transcriber = "whisperx"`, HF token). Default model `large-v3-turbo`, default language `auto` (detected, set `lang = "it"` to force Italian)
 - Config: `~/.config/nastro/config.toml`, defaults in memory, never written by tool
 
 ## Capabilities and Constraints
@@ -31,7 +31,7 @@ Only terminal call recorder: no bot entering call (capture via CoreAudio process
 - Commands: `nastro` (TUI), `record`, `records --plain`, `transcribe <id|last>`; every TUI flow has headless CLI equivalent
 - Two-binary architecture: `nastro` (Go) orchestrating + `nastro-tap` (Swift) for capture; communication via stdout (levels `level sys=.. mic=..`) and exit code (2 = missing permission)
 - Guarantees: incremental write (file valid even after crash), periodic metadata (crash loses ≤5s of duration), lockfile with staleness detection, caffeinate anti-sleep, records <2s discarded
-- **UI language: English, decided and applied** (2026-08-07). Italian remains only as default transcription language
+- **UI language: English, decided and applied** (2026-08-07). Italian was the default transcription language until 2026-10, now `auto` (language detection)
 - Confirmed Won't: no AI summarization/cloud, no GUI (exception: indicator ● NSStatusItem best-effort), no auto-start on meeting detection
 - Video: phase 2 declared, not implemented
 

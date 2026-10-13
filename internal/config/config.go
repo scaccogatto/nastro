@@ -51,7 +51,7 @@ func Default(homeDir string) Config {
 	return Config{
 		OutputDir:                 filepath.Join(homeDir, "Recordings", "nastro"),
 		WhisperModel:              "large-v3-turbo",
-		Lang:                      "it",
+		Lang:                      LangAuto,
 		Transcriber:               "whisper-cli",
 		MaxParallelTranscriptions: 2,
 	}

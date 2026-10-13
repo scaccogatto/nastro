@@ -96,7 +96,7 @@ Backend selected from config (`transcriber`): **whisper-cli** (default, whisper.
 5. Output: `transcript.txt` + `transcript.srt` in record directory. With whisperx, each line/block prefixed by detected speaker (e.g. `[SPEAKER_00] text...`), grouping consecutive segments of same speaker; with whisper-cli, no prefix (no diarization)
 6. macOS notification at job end (should)
 
-Config defaults: `transcriber = "whisper-cli"` (whisperx recommended opt-in for speaker labels), `model = "large-v3-turbo"`, `lang = "it"`, `max_parallel_transcriptions = 2`.
+Config defaults: `transcriber = "whisper-cli"` (whisperx recommended opt-in for speaker labels), `model = "large-v3-turbo"`, `lang = "auto"`, `max_parallel_transcriptions = 2`.
 
 A failure (afconvert or transcription backend) never exposes raw error ("afconvert: exit status 1" bare): translated to actionable message (likely cause, suggestion to reduce model if failure looks like memory, otherwise captured detail), both in TUI and CLI.
 
