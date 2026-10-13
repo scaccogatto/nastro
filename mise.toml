@@ -1,2 +1,3 @@
 [tools]
-go = "latest"
+# Same toolchain as the go directive in go.mod (what CI builds with).
+go = "1.26.9"

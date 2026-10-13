@@ -1,6 +1,6 @@
 module github.com/scaccogatto/nastro
 
-go 1.26.5
+go 1.26.9
 
 require (
 	charm.land/bubbles/v2 v2.2.1
