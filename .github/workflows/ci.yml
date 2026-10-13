@@ -4,15 +4,31 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly, so a newly published Go vulnerability fails CI even when nothing
+  # was pushed.
+  schedule:
+    - cron: '17 6 * * 1'
+  # Release runs this same workflow on the tagged commit before publishing.
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 15
+    concurrency:
+      # PR runs supersede older ones for the same branch. Every other run
+      # (main, schedule, release) gets its own group and is never canceled.
+      group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.run_id }}
+      cancel-in-progress: true
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
@@ -33,3 +49,6 @@ jobs:
 
       - name: go test
         run: go test -race -count=1 ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
