@@ -1373,6 +1373,11 @@ if micOnly && systemOnly {
     fail("Error: --mic-only and --system-only are mutually exclusive.")
 }
 
+// The recording is private: AVAudioFile creates it with the process umask
+// (usually 0644, readable by every `staff` account on a shared Mac), so
+// restrict it to the owner before anything is written.
+umask(0o077)
+
 let mode: Recorder.Mode = micOnly ? .micOnly : (systemOnly ? .systemOnly : .mixed)
 let outputURL = URL(fileURLWithPath: outputPath)
 let recorder = Recorder(outputURL: outputURL, mode: mode)

@@ -581,7 +581,8 @@ func (m Model) updateKeyDownloadConfirm(msg tea.KeyPressMsg) (tea.Model, tea.Cmd
 		m.mode = modeDownloading
 		return m, tea.Batch(m.transcribeSpinner.Tick, startToolInstallCmd(ctx, *m.pendingInstall))
 	}
-	job := transcribe.StartModelDownload(transcribe.ModelDownloadURL(m.cfg.WhisperModel), m.pendingModelPath)
+	wantSHA256, _ := transcribe.ModelSHA256(m.cfg.WhisperModel)
+	job := transcribe.StartModelDownload(transcribe.ModelDownloadURL(m.cfg.WhisperModel), m.pendingModelPath, wantSHA256)
 	m.downloadJob = job
 	m.downloadPct = 0
 	m.mode = modeDownloading

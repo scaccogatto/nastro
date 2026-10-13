@@ -12,6 +12,21 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// LangAuto is the Lang value that lets the transcription backend detect the
+// spoken language itself (whisper-cli `-l auto`, whisperx without
+// --language).
+const LangAuto = "auto"
+
+// Recordings and transcripts are private by default: on a shared Mac every
+// standard account is in the `staff` group, so group/world-readable files
+// under the output dir would be readable by other users.
+const (
+	// PrivateDirMode is used for the output dir and every record dir.
+	PrivateDirMode os.FileMode = 0o700
+	// PrivateFileMode is used for transcripts, logs and lockfiles.
+	PrivateFileMode os.FileMode = 0o600
+)
+
 // Config holds nastro's runtime settings.
 type Config struct {
 	OutputDir    string `toml:"output_dir"`

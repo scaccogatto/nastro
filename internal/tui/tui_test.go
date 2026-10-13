@@ -1288,7 +1288,7 @@ func TestListCompactFooterUsesWholeWordsNotAbbreviations(t *testing.T) {
 }
 
 func TestUpdateKeyDownloadingCtrlCCancels(t *testing.T) {
-	m := Model{mode: modeDownloading, downloadJob: transcribe.StartModelDownload("http://127.0.0.1:1/nope", filepath.Join(t.TempDir(), "model.bin"))}
+	m := Model{mode: modeDownloading, downloadJob: transcribe.StartModelDownload("http://127.0.0.1:1/nope", filepath.Join(t.TempDir(), "model.bin"), "")}
 	_, cmd := m.Update(tea.KeyPressMsg{Text: "ctrl+c"})
 	if cmd != nil {
 		if _, ok := cmd().(tea.QuitMsg); ok {

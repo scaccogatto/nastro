@@ -2,6 +2,8 @@ package transcribe
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -83,10 +85,128 @@ func TestModelPath(t *testing.T) {
 }
 
 func TestModelDownloadURL(t *testing.T) {
-	got := ModelDownloadURL("large-v3-turbo")
-	want := "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
-	if got != want {
-		t.Errorf("ModelDownloadURL() = %q, want %q", got, want)
+	tests := []struct {
+		model, want string
+	}{
+		{"large-v3-turbo", "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3-turbo.bin"},
+		{"my-finetune", "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-my-finetune.bin"},
+	}
+	for _, tt := range tests {
+		if got := ModelDownloadURL(tt.model); got != tt.want {
+			t.Errorf("ModelDownloadURL(%q) = %q, want %q", tt.model, got, tt.want)
+		}
+	}
+}
+
+func TestModelSHA256(t *testing.T) {
+	if sum, ok := ModelSHA256("large-v3-turbo"); !ok || sum != "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69" {
+		t.Errorf("ModelSHA256(large-v3-turbo) = %q, %v, want the pinned LFS oid", sum, ok)
+	}
+	if _, ok := ModelSHA256("my-finetune"); ok {
+		t.Errorf("ModelSHA256(my-finetune) ok = true, want false for a custom model")
+	}
+}
+
+func TestModelMissingMsg(t *testing.T) {
+	known := modelMissingMsg("/m/ggml-large-v3-turbo.bin", "large-v3-turbo")
+	if !strings.Contains(known, "expected sha256: 1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69") {
+		t.Errorf("modelMissingMsg(known) = %q, want the expected sha256", known)
+	}
+	if custom := modelMissingMsg("/m/ggml-x.bin", "x"); strings.Contains(custom, "sha256") {
+		t.Errorf("modelMissingMsg(custom) = %q, want no sha256 line", custom)
+	}
+}
+
+func TestStartModelDownloadChecksum(t *testing.T) {
+	const content = "nastro-model-bytes"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(content))
+	}))
+	defer srv.Close()
+
+	tests := []struct {
+		name    string
+		want    string
+		wantErr bool
+	}{
+		{"matching sum", sha256Hex(content), false},
+		{"matching sum, upper case", strings.ToUpper(sha256Hex(content)), false},
+		{"mismatching sum", strings.Repeat("0", 64), true},
+		{"no sum (custom model)", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dest := filepath.Join(t.TempDir(), "model.bin")
+			job := StartModelDownload(srv.URL, dest, tt.want)
+			for range job.Progress() {
+			}
+			err := <-job.Wait()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+					t.Fatalf("download error = %v, want checksum mismatch", err)
+				}
+				if _, statErr := os.Stat(dest); !os.IsNotExist(statErr) {
+					t.Errorf("destination exists after checksum mismatch")
+				}
+				if _, statErr := os.Stat(dest + ".part"); !os.IsNotExist(statErr) {
+					t.Errorf(".part file still exists after checksum mismatch")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("download error: %v", err)
+			}
+			if got, _ := os.ReadFile(dest); string(got) != content {
+				t.Errorf("downloaded content = %q, want %q", got, content)
+			}
+		})
+	}
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestTranscriptFilesArePrivate(t *testing.T) {
+	dir := t.TempDir()
+	outPrefix := filepath.Join(dir, "transcript")
+	partialPrefix := outPrefix + ".partial"
+	// whisper-cli writes its output with the process umask: simulate 0644.
+	for _, ext := range []string{".txt", ".srt"} {
+		if err := os.WriteFile(partialPrefix+ext, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := finalizeTranscript(partialPrefix, outPrefix); err != nil {
+		t.Fatalf("finalizeTranscript: %v", err)
+	}
+	for _, ext := range []string{".txt", ".srt"} {
+		assertMode(t, outPrefix+ext, config.PrivateFileMode)
+	}
+
+	w, closeLog := openTranscribeLogWriter(outPrefix)
+	_, _ = fmt.Fprintln(w, "log line")
+	closeLog()
+	assertMode(t, transcribeLogPath(outPrefix), config.PrivateFileMode)
+
+	diarized := filepath.Join(dir, "diarized")
+	if err := writeDiarizedTranscript([]Segment{{Start: 0, End: 1, Text: "hi", Speaker: "SPEAKER_00"}}, diarized); err != nil {
+		t.Fatalf("writeDiarizedTranscript: %v", err)
+	}
+	for _, ext := range []string{".txt", ".srt"} {
+		assertMode(t, diarized+ext, config.PrivateFileMode)
+	}
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("mode of %s = %o, want %o", filepath.Base(path), got, want)
 	}
 }
 
@@ -367,7 +487,7 @@ func TestStartModelDownloadSuccess(t *testing.T) {
 	defer srv.Close()
 
 	dest := filepath.Join(t.TempDir(), "model.bin")
-	job := StartModelDownload(srv.URL, dest)
+	job := StartModelDownload(srv.URL, dest, "")
 
 	var lastPct float64
 	for p := range job.Progress() {
@@ -409,7 +529,7 @@ func TestStartModelDownloadCancelCleansUpPartFile(t *testing.T) {
 	}()
 
 	dest := filepath.Join(t.TempDir(), "model.bin")
-	job := StartModelDownload(srv.URL, dest)
+	job := StartModelDownload(srv.URL, dest, "")
 
 	// Wait for at least one progress tick so we know the .part file exists,
 	// then cancel.

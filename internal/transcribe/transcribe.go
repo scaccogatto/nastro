@@ -9,6 +9,8 @@ package transcribe
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -53,10 +55,65 @@ func ModelPath(homeDir, model string) string {
 	return filepath.Join(homeDir, ".cache", "whisper", "ggml-"+model+".bin")
 }
 
+// modelRepoCommit pins ggerganov/whisper.cpp on huggingface.co to the
+// commit modelSHA256 was taken from, so a known model's bytes can't change
+// under a moving ref.
+const modelRepoCommit = "5359861c739e955e79d9a303bcbc70fb988958b1"
+
+// modelSHA256 maps each ggml model published at modelRepoCommit to its
+// SHA-256 (the file's Git LFS oid on huggingface.co).
+var modelSHA256 = map[string]string{
+	"base-q5_1":           "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898",
+	"base-q8_0":           "c577b9a86e7e048a0b7eada054f4dd79a56bbfa911fbdacf900ac5b567cbb7d9",
+	"base":                "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+	"base.en-q5_1":        "4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f",
+	"base.en-q8_0":        "a4d4a0768075e13cfd7e19df3ae2dbc4a68d37d36a7dad45e8410c9a34f8c87e",
+	"base.en":             "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+	"large-v1":            "7d99f41a10525d0206bddadd86760181fa920438b6b33237e3118ff6c83bb53d",
+	"large-v2-q5_0":       "3a214837221e4530dbc1fe8d734f302af393eb30bd0ed046042ebf4baf70f6f2",
+	"large-v2-q8_0":       "fef54e6d898246a65c8285bfa83bd1807e27fadf54d5d4e81754c47634737e8c",
+	"large-v2":            "9a423fe4d40c82774b6af34115b8b935f34152246eb19e80e376071d3f999487",
+	"large-v3-q5_0":       "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
+	"large-v3-turbo-q5_0": "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+	"large-v3-turbo-q8_0": "317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1",
+	"large-v3-turbo":      "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+	"large-v3":            "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+	"medium-q5_0":         "19fea4b380c3a618ec4723c3eef2eb785ffba0d0538cf43f8f235e7b3b34220f",
+	"medium-q8_0":         "42a1ffcbe4167d224232443396968db4d02d4e8e87e213d3ee2e03095dea6502",
+	"medium":              "6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208",
+	"medium.en-q5_0":      "76733e26ad8fe1c7a5bf7531a9d41917b2adc0f20f2e4f5531688a8c6cd88eb0",
+	"medium.en-q8_0":      "43fa2cd084de5a04399a896a9a7a786064e221365c01700cea4666005218f11c",
+	"medium.en":           "cc37e93478338ec7700281a7ac30a10128929eb8f427dda2e865faa8f6da4356",
+	"small-q5_1":          "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
+	"small-q8_0":          "49c8fb02b65e6049d5fa6c04f81f53b867b5ec9540406812c643f177317f779f",
+	"small":               "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+	"small.en-q5_1":       "bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30",
+	"small.en-q8_0":       "67a179f608ea6114bd3fdb9060e762b588a3fb3bd00c4387971be4d177958067",
+	"small.en":            "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+	"tiny-q5_1":           "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7",
+	"tiny-q8_0":           "c2085835d3f50733e2ff6e4b41ae8a2b8d8110461e18821b09a15c40c42d1cca",
+	"tiny":                "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",
+	"tiny.en-q5_1":        "c77c5766f1cef09b6b7d47f21b546cbddd4157886b3b5d6d4f709e91e66c7c2b",
+	"tiny.en-q8_0":        "5bc2b3860aa151a4c6e7bb095e1fcce7cf12c7b020ca08dcec0c6d018bb7dd94",
+	"tiny.en":             "921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f",
+}
+
+// ModelSHA256 returns the expected SHA-256 (hex) of a known ggml model, and
+// ok=false for a custom model name nastro has no checksum for.
+func ModelSHA256(model string) (sum string, ok bool) {
+	sum, ok = modelSHA256[model]
+	return sum, ok
+}
+
 // ModelDownloadURL returns the huggingface.co URL a whisper.cpp ggml model
-// is downloaded from.
+// is downloaded from: pinned to modelRepoCommit for a known model, the
+// repo's main branch for a custom name (which may postdate the pin).
 func ModelDownloadURL(model string) string {
-	return "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-" + model + ".bin"
+	ref := "main"
+	if _, ok := modelSHA256[model]; ok {
+		ref = modelRepoCommit
+	}
+	return "https://huggingface.co/ggerganov/whisper.cpp/resolve/" + ref + "/ggml-" + model + ".bin"
 }
 
 // DownloadPercent computes 0..1 progress from downloaded/total bytes; 0 when
@@ -391,6 +448,13 @@ func StartWhisper(ctx context.Context, modelPath, lang, outPrefix, wavPath strin
 // .txt/.srt output to outPrefix, overwriting any previous transcript only
 // now that the new one is known-complete.
 func finalizeTranscript(partialPrefix, outPrefix string) error {
+	// whisper-cli creates its output with the process umask (usually
+	// 0644): tighten both files before they become the transcript.
+	for _, ext := range []string{".txt", ".srt"} {
+		if err := os.Chmod(partialPrefix+ext, config.PrivateFileMode); err != nil {
+			return err
+		}
+	}
 	if err := os.Rename(partialPrefix+".txt", outPrefix+".txt"); err != nil {
 		return err
 	}
@@ -444,7 +508,7 @@ func transcribeLogPath(outPrefix string) string {
 // error opening it (e.g. the record dir vanished), returns io.Discard and a
 // no-op close rather than failing the whole transcribe run over a log file.
 func openTranscribeLogWriter(outPrefix string) (io.Writer, func()) {
-	f, err := os.OpenFile(transcribeLogPath(outPrefix), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(transcribeLogPath(outPrefix), os.O_APPEND|os.O_CREATE|os.O_WRONLY, config.PrivateFileMode)
 	if err != nil {
 		return io.Discard, func() {}
 	}
@@ -487,20 +551,23 @@ func (j *DownloadJob) Wait() <-chan error { return j.waitErr }
 func (j *DownloadJob) Cancel() { j.cancel() }
 
 // StartModelDownload starts streaming url to destPath in the background.
-func StartModelDownload(url, destPath string) *DownloadJob {
+// When wantSHA256 is non-empty, the downloaded bytes must hash to it (hex,
+// case-insensitive) or the download fails and nothing lands at destPath.
+// An empty wantSHA256 skips the check (custom models).
+func StartModelDownload(url, destPath, wantSHA256 string) *DownloadJob {
 	ctx, cancel := context.WithCancel(context.Background())
 	progress := make(chan DownloadProgress, 1)
 	waitErr := make(chan error, 1)
 
 	go func() {
-		waitErr <- runDownload(ctx, url, destPath, progress)
+		waitErr <- runDownload(ctx, url, destPath, wantSHA256, progress)
 		close(progress)
 	}()
 
 	return &DownloadJob{progress: progress, waitErr: waitErr, cancel: cancel}
 }
 
-func runDownload(ctx context.Context, url, destPath string, progress chan<- DownloadProgress) (err error) {
+func runDownload(ctx context.Context, url, destPath, wantSHA256 string, progress chan<- DownloadProgress) (err error) {
 	partPath := destPath + ".part"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -530,6 +597,7 @@ func runDownload(ctx context.Context, url, destPath string, progress chan<- Down
 		}
 	}()
 
+	hash := sha256.New()
 	total := resp.ContentLength
 	var downloaded int64
 	buf := make([]byte, 32*1024)
@@ -545,6 +613,7 @@ func runDownload(ctx context.Context, url, destPath string, progress chan<- Down
 			if _, werr := out.Write(buf[:n]); werr != nil {
 				return werr
 			}
+			hash.Write(buf[:n])
 			downloaded += int64(n)
 			select {
 			case progress <- DownloadProgress{Downloaded: downloaded, Total: total}:
@@ -562,7 +631,23 @@ func runDownload(ctx context.Context, url, destPath string, progress chan<- Down
 	if err := out.Close(); err != nil {
 		return err
 	}
+	if wantSHA256 != "" {
+		if got := hex.EncodeToString(hash.Sum(nil)); !strings.EqualFold(got, wantSHA256) {
+			return fmt.Errorf("download %s: checksum mismatch: got sha256 %s, want %s", url, got, wantSHA256)
+		}
+	}
 	return os.Rename(partPath, destPath)
+}
+
+// modelMissingMsg is the CLI's error for a missing ggml model: where it is
+// expected, where to download it from and, for a known model, the SHA-256
+// to verify the manual download against.
+func modelMissingMsg(modelPath, model string) string {
+	msg := fmt.Sprintf("whisper model not found at %s\ndownload it from: %s", modelPath, ModelDownloadURL(model))
+	if sum, ok := ModelSHA256(model); ok {
+		msg += "\nexpected sha256: " + sum
+	}
+	return msg
 }
 
 // installConfirmPrompt formats offer's stdin confirmation prompt for Run --
@@ -627,8 +712,7 @@ func Run(cfg config.Config, idOrLast string) error {
 		return errors.New(status.MissingMsg)
 	}
 	if status.ModelMissing {
-		return fmt.Errorf("whisper model not found at %s\ndownload it from: %s",
-			status.ModelPath, ModelDownloadURL(cfg.WhisperModel))
+		return errors.New(modelMissingMsg(status.ModelPath, cfg.WhisperModel))
 	}
 
 	home, err := os.UserHomeDir()

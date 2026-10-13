@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/scaccogatto/nastro/internal/config"
 )
 
 // WhisperXMissingMsg is the guided error shown when neither whisperx nor its
@@ -200,6 +202,43 @@ func srtTimestamp(seconds float64) string {
 	return fmt.Sprintf("%02d:%02d:%02d,%03d", h, m, s, ms)
 }
 
+// whisperXArgs builds whisperx's argv. The HuggingFace token is deliberately
+// absent: argv is readable by every local user via ps for the whole run, so
+// the token travels through the child's environment instead (see
+// withHFToken). lang "auto" (or empty) omits --language, letting whisperx
+// detect it.
+func whisperXArgs(wavPath, lang, model, outDir string) []string {
+	args := []string{wavPath, "--diarize"}
+	if lang != "" && lang != config.LangAuto {
+		args = append(args, "--language", lang)
+	}
+	return append(args,
+		"--model", model,
+		"--device", "cpu",
+		"--compute_type", "int8",
+		"--output_dir", outDir,
+		"--output_format", "json",
+	)
+}
+
+// withHFToken returns env with HF_TOKEN set to token (replacing any
+// inherited value, so the resolved config token always wins).
+// huggingface_hub, which pyannote and whisperx use for the gated
+// diarization models, reads HF_TOKEN when no explicit token is passed. An
+// empty token leaves env untouched.
+func withHFToken(env []string, token string) []string {
+	if token == "" {
+		return env
+	}
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if !strings.HasPrefix(kv, "HF_TOKEN=") {
+			out = append(out, kv)
+		}
+	}
+	return append(out, "HF_TOKEN="+token)
+}
+
 // --- everything below is side-effecting orchestration: subprocess exec,
 // filesystem. Deliberately outside TDD scope, same as StartWhisper. ---
 
@@ -234,21 +273,12 @@ func StartWhisperX(ctx context.Context, hfToken, lang, model, outPrefix, wavPath
 		return nil, fmt.Errorf("create whisperx temp dir: %w", err)
 	}
 
-	cmd := exec.CommandContext(ctx, whisperxPath, wavPath,
-		"--diarize",
-		"--language", lang,
-		"--model", model,
-		"--hf_token", hfToken,
-		"--device", "cpu",
-		"--compute_type", "int8",
-		"--output_dir", tmpDir,
-		"--output_format", "json",
-	)
+	cmd := exec.CommandContext(ctx, whisperxPath, whisperXArgs(wavPath, lang, model, tmpDir)...)
 	// whisperx shells out to ffmpeg (via torchcodec/pyav) to load audio; a
 	// bare PATH -- common outside an interactive shell -- often can't find
 	// it even once whisperx itself is resolved. Same fallback as
 	// resolveTool, applied to the child's own PATH lookups.
-	cmd.Env = subprocessEnv()
+	cmd.Env = withHFToken(subprocessEnv(), hfToken)
 	pr, pw := io.Pipe()
 	logW, closeLog := openTranscribeLogWriter(outPrefix)
 	cmd.Stdout = io.MultiWriter(pw, logW)
@@ -302,10 +332,10 @@ func finishWhisperX(tmpDir, wavPath, outPrefix string) error {
 // StartWhisper's whisper-cli output gets.
 func writeDiarizedTranscript(segs []Segment, outPrefix string) error {
 	partialPrefix := outPrefix + ".partial"
-	if err := os.WriteFile(partialPrefix+".txt", []byte(formatDiarizedTxt(segs)), 0o644); err != nil {
+	if err := os.WriteFile(partialPrefix+".txt", []byte(formatDiarizedTxt(segs)), config.PrivateFileMode); err != nil {
 		return err
 	}
-	if err := os.WriteFile(partialPrefix+".srt", []byte(formatDiarizedSrt(segs)), 0o644); err != nil {
+	if err := os.WriteFile(partialPrefix+".srt", []byte(formatDiarizedSrt(segs)), config.PrivateFileMode); err != nil {
 		os.Remove(partialPrefix + ".txt")
 		return err
 	}

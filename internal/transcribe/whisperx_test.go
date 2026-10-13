@@ -503,3 +503,83 @@ func TestStartTranscribeBackendDispatch(t *testing.T) {
 		}
 	})
 }
+
+// fakeWhisperXRecordScript records its argv and HF_TOKEN to the files named
+// by $NASTRO_TEST_ARGS / $NASTRO_TEST_TOKEN, then fails (the test only
+// cares about how it was invoked).
+const fakeWhisperXRecordScript = `#!/bin/sh
+printf '%s\n' "$@" > "$NASTRO_TEST_ARGS"
+printf '%s' "$HF_TOKEN" > "$NASTRO_TEST_TOKEN"
+exit 1
+`
+
+func TestStartWhisperXPassesTokenViaEnvNotArgv(t *testing.T) {
+	writeFakeWhisperX(t, fakeWhisperXRecordScript)
+	dir := t.TempDir()
+	argsFile, tokenFile := filepath.Join(dir, "args"), filepath.Join(dir, "token")
+	t.Setenv("NASTRO_TEST_ARGS", argsFile)
+	t.Setenv("NASTRO_TEST_TOKEN", tokenFile)
+	t.Setenv("HF_TOKEN", "hf_inherited")
+
+	const token = "hf_secret_from_config"
+	job, err := StartWhisperX(context.Background(), token, "it", "large-v3-turbo", filepath.Join(dir, "transcript"), filepath.Join(dir, "audio.wav"))
+	if err != nil {
+		t.Fatalf("StartWhisperX: %v", err)
+	}
+	go func() {
+		for range job.Lines() {
+		}
+	}()
+	<-job.Wait()
+
+	if strings.Contains(strings.Join(job.cmd.Args, " "), token) {
+		t.Errorf("cmd.Args = %q, must not contain the HF token", job.cmd.Args)
+	}
+	args, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read recorded args: %v", err)
+	}
+	if strings.Contains(string(args), token) || strings.Contains(string(args), "--hf_token") {
+		t.Errorf("whisperx argv = %q, must not carry the HF token", args)
+	}
+	gotToken, err := os.ReadFile(tokenFile)
+	if err != nil {
+		t.Fatalf("read recorded token: %v", err)
+	}
+	if string(gotToken) != token {
+		t.Errorf("whisperx HF_TOKEN = %q, want %q (config token wins over the inherited one)", gotToken, token)
+	}
+}
+
+func TestWhisperXArgs(t *testing.T) {
+	tests := []struct {
+		lang         string
+		wantLanguage bool
+	}{
+		{"it", true},
+		{config.LangAuto, false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		args := whisperXArgs("a.wav", tt.lang, "large-v3-turbo", "/tmp/out")
+		joined := strings.Join(args, " ")
+		if got := strings.Contains(joined, "--language"); got != tt.wantLanguage {
+			t.Errorf("whisperXArgs(lang=%q) = %q, --language present = %v, want %v", tt.lang, joined, got, tt.wantLanguage)
+		}
+		if tt.wantLanguage && !strings.Contains(joined, "--language "+tt.lang) {
+			t.Errorf("whisperXArgs(lang=%q) = %q, want --language %s", tt.lang, joined, tt.lang)
+		}
+	}
+}
+
+func TestWithHFToken(t *testing.T) {
+	base := []string{"PATH=/bin", "HF_TOKEN=old"}
+	got := withHFToken(base, "new")
+	want := []string{"PATH=/bin", "HF_TOKEN=new"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("withHFToken() = %q, want %q", got, want)
+	}
+	if got := withHFToken(base, ""); strings.Join(got, "\n") != strings.Join(base, "\n") {
+		t.Errorf("withHFToken(empty) = %q, want env unchanged", got)
+	}
+}
